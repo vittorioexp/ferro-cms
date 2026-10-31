@@ -15,6 +15,7 @@
 
 pub mod bundle;
 pub mod cron;
+pub mod database;
 pub mod diff;
 pub mod directus;
 pub mod fields;

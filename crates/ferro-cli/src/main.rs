@@ -290,9 +290,8 @@ fn init_tracing() {
 
 async fn database() -> anyhow::Result<ferro_engine::db::PgPool> {
     let url = std::env::var("FERRO_DATABASE_URL").map_err(|_| anyhow::anyhow!("FERRO_DATABASE_URL is required"))?;
-    let pool = ferro_engine::db::connect(&url, 2).await?;
-    ferro_engine::db::migrate_system(&pool).await?;
-    Ok(pool)
+    let kind = std::env::var("FERRO_DATABASE_KIND").ok();
+    ferro_engine::db::connect(&url, kind.as_deref(), 2).await.map_err(Into::into)
 }
 
 async fn run(cli: Cli) -> anyhow::Result<i32> {
@@ -306,9 +305,17 @@ async fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Command::Migrate => {
             init_tracing();
-            let pool = database().await?;
-            ferro_engine::schema_store::bootstrap(&pool, None, None).await?;
-            println!("system tables are up to date");
+            let url = std::env::var("FERRO_DATABASE_URL").map_err(|_| anyhow::anyhow!("FERRO_DATABASE_URL is required"))?;
+            let kind = std::env::var("FERRO_DATABASE_KIND").ok();
+            let detected = ferro_core::database::DatabaseKind::detect(&url, kind.as_deref())
+                .map_err(|e| anyhow::anyhow!(e.0))?;
+            if detected == ferro_core::database::DatabaseKind::Postgres {
+                let pool = ferro_engine::db::connect(&url, kind.as_deref(), 2).await?;
+                ferro_engine::schema_store::bootstrap(&pool, None, None).await?;
+            } else {
+                ferro_engine::db::migrate_url(&url, kind.as_deref()).await?;
+            }
+            println!("system tables are up to date ({})", detected.as_str());
             Ok(0)
         }
         Command::Storage { command } => {

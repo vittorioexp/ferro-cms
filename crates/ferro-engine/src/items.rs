@@ -113,7 +113,7 @@ fn now_param() -> Option<String> {
 /// A user-supplied filter may only mention fields the user can read, otherwise filtering (or counting)
 /// would reveal the content of protected fields one guess at a time. Relations are followed with the
 /// permissions of the related collection. The permission's own filter is not checked: it is the rule.
-fn check_filter_access(ctx: &Ctx, info: &CollectionInfo, perm: &Access, filter: &Value, depth: usize) -> Result<()> {
+pub(crate) fn check_filter_access(ctx: &Ctx, info: &CollectionInfo, perm: &Access, filter: &Value, depth: usize) -> Result<()> {
     if depth > 8 {
         return Err(FerroError::invalid("filter is nested too deeply"));
     }
@@ -159,7 +159,7 @@ fn check_sort_access(info: &CollectionInfo, perm: &Access, sort: &[String]) -> R
     Ok(())
 }
 
-fn build_where(
+pub(crate) fn build_where(
     schema: &Schema,
     info: &CollectionInfo,
     perm: &Access,
@@ -433,7 +433,7 @@ fn is_managed(info: &CollectionInfo, name: &str) -> bool {
     info.def.system_fields && SYSTEM_FIELDS.contains(&name)
 }
 
-fn check_fields(perm: &Access, info: &CollectionInfo, obj: &Map<String, Value>) -> Result<()> {
+pub(crate) fn check_fields(perm: &Access, info: &CollectionInfo, obj: &Map<String, Value>) -> Result<()> {
     for k in obj.keys() {
         if k == "id" || is_managed(info, k) {
             continue;
@@ -446,7 +446,7 @@ fn check_fields(perm: &Access, info: &CollectionInfo, obj: &Map<String, Value>) 
     Ok(())
 }
 
-fn validate_payload(perm: &Access, info: &CollectionInfo, obj: &Map<String, Value>, is_create: bool) -> Result<()> {
+pub(crate) fn validate_payload(perm: &Access, info: &CollectionInfo, obj: &Map<String, Value>, is_create: bool) -> Result<()> {
     if let Some(v) = &perm.validation {
         if !matches(v, &Value::Object(obj.clone())) {
             return Err(FerroError::invalid("payload does not satisfy the permission validation rules"));

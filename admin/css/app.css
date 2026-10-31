@@ -180,3 +180,34 @@ code.secret { display: inline-block; font-size: 1.05rem; letter-spacing: .08em; 
 pre.recovery { columns: 2; column-gap: 2rem; }
 a.account-link { text-decoration: none; }
 a.account-link:hover { text-decoration: underline; }
+
+/* dashboard, notifications, comments */
+.dashboard-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.dashboard-panel { min-height: 8rem; }
+.tiles-sm .tile { padding: .6rem .8rem; }
+table.compact { width: 100%; font-size: .85rem; }
+table.compact th, table.compact td { padding: .35rem .5rem; }
+.notif-wrap { position: relative; margin-right: .5rem; }
+.notif-bell { background: transparent; border: 1px solid var(--border); border-radius: var(--radius); padding: .25rem .45rem; cursor: pointer; position: relative; }
+.notif-badge { position: absolute; top: -4px; right: -4px; background: var(--accent); color: var(--accent-text); font-size: .65rem; border-radius: 999px; padding: 0 4px; min-width: 1rem; text-align: center; }
+.notif-menu { position: absolute; right: 0; top: 100%; margin-top: .35rem; min-width: 280px; max-width: 360px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,.12); padding: .5rem; z-index: 20; display: flex; flex-direction: column; gap: .35rem; }
+.notif-menu[hidden] { display: none; }
+.notif-item { text-align: left; border: none; background: var(--bg); border-radius: var(--radius); padding: .45rem .55rem; cursor: pointer; }
+.notif-item.unread { border-left: 3px solid var(--accent); }
+.notif-list { list-style: none; padding: 0; margin: 0; }
+.notif-list li { padding: .45rem 0; border-bottom: 1px solid var(--border); }
+.comment-list { display: flex; flex-direction: column; gap: .75rem; margin-bottom: .75rem; }
+.comment p { margin: .25rem 0 0; white-space: pre-wrap; }
+.preset-host select { max-width: 12rem; }
+
+/* assistant */
+.assistant-panel { display: flex; flex-direction: column; gap: .75rem; min-height: 420px; }
+.assistant-log { flex: 1; overflow-y: auto; max-height: 50vh; display: flex; flex-direction: column; gap: .6rem; padding: .25rem 0; }
+.assistant-msg { padding: .55rem .7rem; border-radius: var(--radius); background: var(--bg); border: 1px solid var(--border); }
+.assistant-user { border-left: 3px solid var(--accent); }
+.assistant-assistant { border-left: 3px solid var(--muted); }
+.assistant-role { font-size: .7rem; text-transform: uppercase; color: var(--muted); margin-bottom: .25rem; }
+.assistant-text { white-space: pre-wrap; }
+.assistant-compose { display: flex; flex-direction: column; gap: .5rem; }
+.assistant-actions { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.assistant-input { min-height: 4rem; }

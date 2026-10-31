@@ -55,6 +55,9 @@ function respond(method, url) {
   if (p === '/activity') return ok([{ timestamp: '2026-01-01T10:00:00Z', user: { email: 'a@b.c' }, action: 'update', collection: 'pages', item: 'p1', origin: 'api' }], { filter_count: 1 });
   if (p === '/schema/history') return ok([{ applied_at: '2026-01-01T10:00:00Z', from_hash: 'aaaaaaaaaaaa', to_hash: 'bbbbbbbbbbbb', plan: { changes: [{ op: 'add_field', collection: 'pages', field: { name: 'x' } }] } }]);
   if (p === '/revisions') return ok([]);
+  if (p === '/presets') return ok([]);
+  if (p === '/dashboard') return ok({ layout: { panels: [{ type: 'collections' }] } });
+  if (p.endsWith('/comments')) return ok([]);
   if (p === '/flows' && method === 'GET') return ok([FLOW]);
   if (p === '/flow-actions') return ok([{ id: 'f-manual', name: 'Reprocess' }]);
   if (p === `/flows/${FLOW.id}` && method === 'PUT') return { data: FLOW, meta: { applied: !u.searchParams.get('dry_run'), changes: ['~ flow Notify'], sql: [] } };

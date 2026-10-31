@@ -3,6 +3,8 @@
 //! ```json
 //! { "_and": [ { "status": { "_eq": "published" } }, { "author": { "name": { "_icontains": "ros" } } } ] }
 //! ```
+//! REST list endpoints also accept bracket query params (`filter[status][_eq]=published`) via
+//! [`parse_bracket_query`] and [`merge_query_filters`].
 //! The SQL compiler lives in the engine; this evaluator is used for permission
 //! `validation` rules and field validation on payloads.
 
@@ -177,6 +179,124 @@ pub fn eval_op(op: &str, value: &Value, operand: &Value) -> bool {
     }
 }
 
+/// Parse Directus-style bracket query params (`filter[status][_eq]=published`) into filter JSON.
+pub fn parse_bracket_query(query: &str) -> Option<Value> {
+    let mut root = Value::Object(Map::new());
+    let mut any = false;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        let Some(path) = filter_key_path(&key) else {
+            continue;
+        };
+        any = true;
+        insert_filter_path(&mut root, &path, parse_query_scalar(&value));
+    }
+    if any { Some(root) } else { None }
+}
+
+/// Combine JSON `filter=` query value with bracket params (both → `_and`).
+pub fn merge_query_filters(json_filter: Option<&str>, query: &str) -> Result<Option<Value>, String> {
+    let json = match json_filter.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => Some(
+            serde_json::from_str::<Value>(raw).map_err(|e| format!("invalid filter JSON: {e}"))?,
+        ),
+        None => None,
+    };
+    let bracket = parse_bracket_query(query);
+    Ok(and_all(vec![json, bracket]))
+}
+
+fn filter_key_path(key: &str) -> Option<Vec<String>> {
+    if key == "filter" {
+        return None;
+    }
+    let rest = key.strip_prefix("filter[")?;
+    if !rest.ends_with(']') {
+        return None;
+    }
+    let inner = &rest[..rest.len() - 1];
+    if inner.is_empty() {
+        return None;
+    }
+    Some(inner.split("][").map(str::to_string).collect())
+}
+
+fn parse_query_scalar(raw: &str) -> Value {
+    if raw == "true" {
+        return Value::Bool(true);
+    }
+    if raw == "false" {
+        return Value::Bool(false);
+    }
+    if raw == "null" {
+        return Value::Null;
+    }
+    if (raw.starts_with('[') && raw.ends_with(']')) || (raw.starts_with('{') && raw.ends_with('}')) {
+        if let Ok(v) = serde_json::from_str(raw) {
+            return v;
+        }
+    }
+    // Keep query values as strings (slugs, UUIDs, zero-padded codes); SQL cast handles typing.
+    Value::String(raw.to_string())
+}
+
+fn insert_filter_path(cur: &mut Value, path: &[String], value: Value) {
+    if path.is_empty() {
+        *cur = value;
+        return;
+    }
+    let head = &path[0];
+    let tail = &path[1..];
+    if let Ok(idx) = head.parse::<usize>() {
+        if !cur.is_array() {
+            *cur = Value::Array(vec![]);
+        }
+        let arr = cur.as_array_mut().expect("filter path array");
+        while arr.len() <= idx {
+            arr.push(Value::Null);
+        }
+        if tail.is_empty() {
+            arr[idx] = value;
+            return;
+        }
+        if arr[idx].is_null() {
+            arr[idx] = if tail[0].parse::<usize>().is_ok() {
+                Value::Array(vec![])
+            } else {
+                Value::Object(Map::new())
+            };
+        } else if !tail.is_empty() {
+            if tail[0].parse::<usize>().is_ok() && !arr[idx].is_array() {
+                arr[idx] = Value::Array(vec![]);
+            } else if tail[0].parse::<usize>().is_err() && !arr[idx].is_object() {
+                arr[idx] = Value::Object(Map::new());
+            }
+        }
+        insert_filter_path(&mut arr[idx], tail, value);
+        return;
+    }
+    if !cur.is_object() {
+        *cur = Value::Object(Map::new());
+    }
+    let obj = cur.as_object_mut().expect("filter path object");
+    let entry = obj.entry(head.clone()).or_insert(Value::Null);
+    if tail.is_empty() {
+        *entry = value;
+        return;
+    }
+    if entry.is_null() {
+        *entry = if tail[0].parse::<usize>().is_ok() {
+            Value::Array(vec![])
+        } else {
+            Value::Object(Map::new())
+        };
+    } else if tail[0].parse::<usize>().is_ok() && !entry.is_array() {
+        *entry = Value::Array(vec![]);
+    } else if tail[0].parse::<usize>().is_err() && !entry.is_object() {
+        *entry = Value::Object(Map::new());
+    }
+    insert_filter_path(entry, tail, value);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +323,74 @@ mod tests {
         vars.insert("$CURRENT_USER".into(), json!("u1"));
         let f = substitute_vars(&json!({"user_created": {"_eq": "$CURRENT_USER"}, "x": {"_eq": "$UNKNOWN"}}), &vars);
         assert_eq!(f, json!({"user_created": {"_eq": "u1"}, "x": {"_eq": null}}));
+    }
+
+    #[test]
+    fn bracket_query_operators() {
+        let q = "filter[status][_eq]=published&fields=id";
+        assert_eq!(
+            parse_bracket_query(q),
+            Some(json!({ "status": { "_eq": "published" } }))
+        );
+        let q = "filter[status]=published";
+        assert_eq!(parse_bracket_query(q), Some(json!({ "status": "published" })));
+        let q = "filter[status][_in][0]=draft&filter[status][_in][1]=published";
+        assert_eq!(
+            parse_bracket_query(q),
+            Some(json!({ "status": { "_in": ["draft", "published"] } }))
+        );
+        let q = "filter[_and][0][status][_eq]=published&filter[_and][1][views][_gt]=10";
+        assert_eq!(
+            parse_bracket_query(q),
+            Some(json!({
+                "_and": [
+                    { "status": { "_eq": "published" } },
+                    { "views": { "_gt": "10" } }
+                ]
+            }))
+        );
+        let q = "filter[author][name][_eq]=Ann";
+        assert_eq!(
+            parse_bracket_query(q),
+            Some(json!({ "author": { "name": { "_eq": "Ann" } } }))
+        );
+        let q = "filter[code][_eq]=007";
+        assert_eq!(parse_bracket_query(q), Some(json!({ "code": { "_eq": "007" } })));
+        let q = "filter[year][_between][0]=2020&filter[year][_between][1]=2021";
+        assert_eq!(
+            parse_bracket_query(q),
+            Some(json!({ "year": { "_between": ["2020", "2021"] } }))
+        );
+        let q = "filter[_or][0][status][_eq]=draft&filter[_or][1][status][_eq]=published";
+        assert_eq!(
+            parse_bracket_query(q),
+            Some(json!({
+                "_or": [
+                    { "status": { "_eq": "draft" } },
+                    { "status": { "_eq": "published" } }
+                ]
+            }))
+        );
+        assert_eq!(parse_bracket_query("filter[]=ignored&filter[status][_eq]=ok"), Some(json!({ "status": { "_eq": "ok" } })));
+        let q = "filter[blocks][_some][collection][_eq]=block_text";
+        assert_eq!(
+            parse_bracket_query(q),
+            Some(json!({ "blocks": { "_some": { "collection": { "_eq": "block_text" } } } }))
+        );
+    }
+
+    #[test]
+    fn merge_json_and_bracket_filters() {
+        let q = "filter[title][_eq]=Hello";
+        let merged = merge_query_filters(Some(r#"{"status":{"_eq":"published"}}"#), q).unwrap();
+        assert_eq!(
+            merged,
+            Some(json!({
+                "_and": [
+                    { "status": { "_eq": "published" } },
+                    { "title": { "_eq": "Hello" } }
+                ]
+            }))
+        );
     }
 }

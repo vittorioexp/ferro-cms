@@ -9,3 +9,6 @@ Single-page app in plain JavaScript (ES modules, no dependencies, no build step)
 
 Layout: `js/api.js` (HTTP + auth), `js/schema.js` (model helpers), `js/form.js` (form generated from the model,
 including inline O2M/M2M and M2A blocks), `js/views/*` (one file per area), `js/main.js` (shell and routing).
+Data promotion helpers: `js/sync.js` (export / file transfer / import from Environment page).
+
+**User-facing guide:** [docs/ADMIN.md](../docs/ADMIN.md) (routes, Environment, Assistant, extensions).

@@ -94,6 +94,15 @@ pub fn validate_snapshot(s: &Snapshot) -> Vec<String> {
                 errors.push(format!("{ctx}: archive_field `{af}` does not exist"));
             }
         }
+        if c.meta.versioning.enabled {
+            if let Some(sf) = &c.meta.versioning.schedule_field {
+                match c.field(sf) {
+                    Some(f) if f.ty == FieldType::Datetime => {}
+                    Some(_) => errors.push(format!("{ctx}: versioning.schedule_field `{sf}` must be a datetime field")),
+                    None => errors.push(format!("{ctx}: versioning.schedule_field `{sf}` does not exist")),
+                }
+            }
+        }
     }
 
     let mut policy_ids = BTreeSet::new();
@@ -295,6 +304,24 @@ mod tests {
         let s = snapshot(include_str!("../tests/fixtures/pages.yaml"));
         let errors = validate_snapshot(&s);
         assert!(errors.is_empty(), "{errors:#?}");
+    }
+
+    #[test]
+    fn versioning_schedule_field_must_be_datetime() {
+        let s = snapshot(
+            r#"
+collections:
+  - name: posts
+    meta:
+      versioning:
+        enabled: true
+        schedule_field: title
+    fields:
+      - { name: title, type: string }
+"#,
+        );
+        let errors = validate_snapshot(&s);
+        assert!(errors.iter().any(|e| e.contains("schedule_field") && e.contains("datetime")));
     }
 
     #[test]

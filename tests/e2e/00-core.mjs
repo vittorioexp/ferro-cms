@@ -23,6 +23,10 @@ export default async function ({ a, check }) {
   // filters / search / counts / errors
   const some = await a.rest('GET', `/items/pages?filter=${encodeURIComponent(JSON.stringify({ blocks: { _some: { collection: { _eq: 'block_text' } } }, slug: { _eq: slug } }))}&meta=filter_count`);
   check('relational filter (_some)', some.data.length === 1 && some.json.meta.filter_count === 1);
+  const bracket = await a.rest('GET', `/items/pages?filter[slug][_eq]=${encodeURIComponent(slug)}&fields=slug&limit=1`);
+  check('bracket filter filter[slug][_eq]', bracket.status === 200 && bracket.data.length === 1 && bracket.data[0].slug === slug);
+  const bracketCount = await a.rest('GET', `/items/pages?filter[slug][_eq]=${encodeURIComponent(slug)}&meta=filter_count&limit=0`);
+  check('bracket filter meta.filter_count', bracketCount.json.meta?.filter_count === 1);
   check('search', (await a.rest('GET', `/items/pages?search=${slug}&fields=slug`)).data.length === 1);
   check('unique violation is 409', (await a.rest('POST', '/items/pages', { title: 'dup', slug })).status === 409);
   check('unknown field is 400', (await a.rest('POST', '/items/pages', { title: 'x', slug: rnd(), nope: 1 })).status === 400);

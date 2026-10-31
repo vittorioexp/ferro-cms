@@ -281,7 +281,11 @@ pub async fn missing_blobs(conn: &mut PgConnection, schema: &Schema, storage: &d
             (None, _) => true,
             _ => false,
         };
-        if !blob || !same {
+        if !blob {
+            missing.push(*id);
+            continue;
+        }
+        if !same {
             missing.push(*id);
         }
     }

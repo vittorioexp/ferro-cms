@@ -20,6 +20,8 @@ import { activityView, schemaView } from './views/system.js';
 import { usersView } from './views/users.js';
 import { accountView } from './views/account.js';
 import { inviteView, resetView, ssoView } from './views/auth.js';
+import { dashboardHome, mountNotificationBell } from './views/dashboard.js';
+import { assistantView } from './views/assistant.js';
 
 const app = document.getElementById('app');
 
@@ -29,13 +31,7 @@ if (params.get('api')) sessionStorage.setItem('ferro_api', params.get('api'));
 configure({ base: params.get('api') || sessionStorage.getItem('ferro_api') || '', onAuthLost: () => showLogin('Your session has expired.') });
 
 async function home(root) {
-  const cols = S.userCollections().filter((c) => !c.meta?.hidden);
-  add(root, 
-    h('div', { class: 'page-head' }, h('h1', {}, 'Content')),
-    cols.length
-      ? h('div', { class: 'tiles' }, cols.map((c) => h('a', { class: 'tile', href: `#/content/${encodeURIComponent(c.name)}` }, h('strong', {}, S.collectionLabel(c)), h('span', { class: 'muted' }, `${(c.fields || []).length} fields`))))
-      : h('p', { class: 'muted' }, isAdmin() ? 'No collections yet. Create the first one in "Data model".' : 'You have no accessible collections.'),
-  );
+  await dashboardHome(root);
 }
 
 async function extensionPage(root, { id }) {
@@ -52,6 +48,7 @@ const ROUTES = [
   ['/account', accountView, false],
   ['/files', filesView, false],
   ['/graphql', graphqlView, false],
+  ['/assistant', assistantView, false],
   ['/ext/:id', extensionPage, false],
   ['/flows', flowsView, true],
   ['/users', usersView, true],
@@ -115,7 +112,7 @@ function drawNav() {
   const sections = [];
   for (const [g, items] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) sections.push(section(g ? S.collectionLabel(g) : 'Content', items));
   if (registry.pages.length) sections.push(section('Extensions', registry.pages.map((p) => link(p.title, `#/ext/${p.id}`))));
-  sections.push(section('Library', [link('Files', '#/files'), link('GraphQL', '#/graphql')]));
+  sections.push(section('Library', [link('Dashboard', '#/content'), link('Assistant', '#/assistant'), link('Files', '#/files'), link('GraphQL', '#/graphql')]));
   if (isAdmin()) {
     sections.push(
       section('Administration', [link('Users', '#/users'), link('Data model', '#/model'), link('Access control', '#/access'), link('Automations', '#/flows'), link('Environment', '#/schema'), link('Activity', '#/activity')]),
@@ -162,6 +159,7 @@ async function start() {
     return showLogin('This account has no access to the admin app.');
   }
   renderShell();
+  mountNotificationBell(document.querySelector('.topbar'));
   await route();
 }
 

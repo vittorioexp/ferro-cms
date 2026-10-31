@@ -2,7 +2,11 @@
 
 mod error;
 mod extract;
+mod http_cache;
 mod login_guard;
+mod middleware;
+mod openapi;
+mod rate_limit;
 mod routes;
 
 use std::path::PathBuf;
@@ -36,6 +40,7 @@ pub fn with_token(base: &str, token: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub database_kind: Option<String>,
     pub database_url: String,
     pub bind: String,
     pub secret: String,
@@ -74,6 +79,18 @@ pub struct Config {
     pub image_concurrency: usize,
     /// Budget of the per-instance cache of transformed images; 0 disables it.
     pub image_cache_bytes: usize,
+    /// Max authenticated requests per IP/user per minute; 0 = off.
+    pub rate_limit_rpm: u32,
+    /// GET /items/* response cache TTL (seconds); 0 = off.
+    pub http_cache_ttl_secs: u64,
+    /// Max cached GET responses per instance.
+    pub http_cache_max_entries: usize,
+    /// Natural-language assistant (OpenAI-compatible).
+    pub ai_enabled: bool,
+    pub ai_api_key: Option<String>,
+    pub ai_base_url: String,
+    pub ai_model: String,
+    pub ai_max_rounds: u32,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -98,6 +115,7 @@ impl Config {
             anyhow::bail!("FERRO_SECRET must be at least 32 characters");
         }
         Ok(Config {
+            database_kind: env_opt("FERRO_DATABASE_KIND"),
             database_url: env_opt("FERRO_DATABASE_URL").context("FERRO_DATABASE_URL is required")?,
             bind: env_or("FERRO_BIND", "0.0.0.0:8055"),
             secret,
@@ -137,6 +155,14 @@ impl Config {
             },
             image_concurrency: env_num("FERRO_IMAGE_CONCURRENCY", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2))?,
             image_cache_bytes: env_num::<usize>("FERRO_IMAGE_CACHE_MB", 64)? * 1024 * 1024,
+            rate_limit_rpm: env_num("FERRO_RATE_LIMIT_RPM", 0)?,
+            http_cache_ttl_secs: env_num("FERRO_HTTP_CACHE_TTL", 0)?,
+            http_cache_max_entries: env_num("FERRO_HTTP_CACHE_MAX_ENTRIES", 512)?,
+            ai_enabled: env_or("FERRO_AI_ENABLED", "false") == "true",
+            ai_api_key: env_opt("FERRO_AI_API_KEY"),
+            ai_base_url: env_or("FERRO_AI_BASE_URL", "https://api.openai.com/v1"),
+            ai_model: env_or("FERRO_AI_MODEL", "gpt-4o-mini"),
+            ai_max_rounds: env_num("FERRO_AI_MAX_ROUNDS", 12u32)?.clamp(1, 32),
         })
     }
 }
@@ -160,6 +186,8 @@ pub struct Inner {
     /// Throttles `POST /auth/password/request`: it can make Ferro send mail to anybody.
     pub reset_guard: login_guard::LoginGuard,
     pub image_cache: ferro_engine::images::TransformCache,
+    pub rate_limit: rate_limit::RateLimiter,
+    pub http_cache: http_cache::HttpCache,
 }
 
 #[derive(Clone)]
@@ -209,6 +237,9 @@ pub fn router(state: AppState) -> Router {
         CorsLayer::new().allow_origin(AllowOrigin::list(origins)).allow_methods(Any).allow_headers(Any)
     };
     let mut app = routes::router().layer(DefaultBodyLimit::max(state.config.max_body_bytes));
+    app = app
+        .layer(axum::middleware::from_fn_with_state(state.clone(), middleware::http_cache_middleware))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), middleware::rate_limit_middleware));
     if let Some(dir) = &state.config.admin_dir {
         app = app
             .nest_service("/admin", ServeDir::new(dir))
@@ -251,8 +282,13 @@ async fn shutdown_signal() {
 
 pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     ferro_identity::install_crypto_provider();
-    let pool = db::connect(&config.database_url, config.db_max_connections).await.context("database connection")?;
-    db::migrate_system(&pool).await.context("system migrations")?;
+    let pool = db::connect(
+        &config.database_url,
+        config.database_kind.as_deref(),
+        config.db_max_connections,
+    )
+    .await
+    .context("database connection")?;
     schema_store::bootstrap(&pool, config.admin_email.as_deref(), config.admin_password.as_deref())
         .await
         .context("bootstrap")?;
@@ -265,6 +301,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let oauth = ferro_identity::OAuth::new(&config.identity, &config.secret).context("single sign-on")?;
     let directory = config.identity.ldap.clone().map(ferro_identity::ldap::Directory::new);
     let (config_image_concurrency, config_image_cache_bytes) = (config.image_concurrency, config.image_cache_bytes);
+    let (rate_limit_rpm, http_cache_ttl, http_cache_max) =
+        (config.rate_limit_rpm, config.http_cache_ttl_secs, config.http_cache_max_entries);
     let auth = AuthConfig {
         secret: config.secret.clone(),
         access_ttl_secs: config.access_ttl_secs,
@@ -287,6 +325,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         directory,
         reset_guard: login_guard::LoginGuard::new(5, Duration::from_secs(3600)),
         image_cache: ferro_engine::images::TransformCache::new(config_image_cache_bytes),
+        rate_limit: rate_limit::RateLimiter::new(rate_limit_rpm, Duration::from_secs(60)),
+        http_cache: http_cache::HttpCache::new(http_cache_ttl, http_cache_max),
     })))
 }
 
@@ -299,6 +339,16 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     ferro_engine::flows::init(ferro_engine::flows::Runtime::new(state.config.flow_allow_private, state.config.flow_allowed_hosts.clone()));
     let for_worker = state.clone();
     tokio::spawn(ferro_engine::flows::run_worker(state.pool.clone(), Arc::new(move || for_worker.schema.get())));
+    let for_sched = state.clone();
+    let pool_sched = state.pool.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = ferro_engine::versioning::publish_due(&pool_sched, for_sched.schema.get()).await {
+                tracing::warn!(error = %e, "scheduled content publish pass failed");
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(&bind).await.with_context(|| format!("bind {bind}"))?;
     tracing::info!("Ferro listening on http://{bind}");

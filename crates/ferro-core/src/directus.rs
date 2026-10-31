@@ -76,6 +76,7 @@ fn collection_meta(m: &Value) -> CollectionMeta {
         group: s(m, "group"),
         translations: non_null(m, "translations").cloned(),
         revisions: true,
+        versioning: VersioningConfig::default(),
     }
 }
 

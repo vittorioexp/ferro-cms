@@ -1,0 +1,8 @@
+{
+  "name": "@ferro/sdk",
+  "version": "0.1.0",
+  "description": "JavaScript client for the Ferro headless CMS API",
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js"
+}

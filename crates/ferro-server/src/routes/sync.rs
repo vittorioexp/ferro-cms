@@ -28,7 +28,7 @@ pub struct ExportBody {
     selections: Vec<Selection>,
 }
 
-pub async fn export(State(st): State<AppState>, Acc(acc): Acc, Json(body): Json<ExportBody>) -> ApiResult<Json<Bundle>> {
+pub async fn export(State(st): State<AppState>, Acc(acc): Acc, Json(body): Json<ExportBody>) -> ApiResult<Json<Value>> {
     acc.require_admin()?;
     if body.selections.is_empty() {
         return Err(ApiError::bad_request("at least one selection is required"));
@@ -36,7 +36,7 @@ pub async fn export(State(st): State<AppState>, Acc(acc): Acc, Json(body): Json<
     let schema = st.schema.get();
     let mut conn = st.pool.acquire().await?;
     let bundle = sync::export(&mut conn, &schema, &body.selections, Some(st.config.env_name.clone())).await?;
-    Ok(Json(bundle))
+    Ok(Json(json!({ "data": bundle })))
 }
 
 #[derive(Deserialize)]

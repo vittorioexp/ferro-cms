@@ -60,7 +60,7 @@ pub async fn run(command: StorageCommand) -> anyhow::Result<i32> {
     }
 }
 
-async fn migrate(pool: &sqlx::PgPool, storages: &Storages, from: &str, to: &str, delete_source: bool, dry_run: bool) -> anyhow::Result<i32> {
+async fn migrate(pool: &ferro_engine::db::PgPool, storages: &Storages, from: &str, to: &str, delete_source: bool, dry_run: bool) -> anyhow::Result<i32> {
     if from == to {
         anyhow::bail!("--from and --to are the same location");
     }

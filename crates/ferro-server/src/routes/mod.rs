@@ -1,4 +1,5 @@
 mod auth;
+mod assistant;
 mod collections;
 mod files;
 mod flows;
@@ -8,6 +9,7 @@ mod schema;
 mod server;
 mod sync;
 mod users;
+mod workspace;
 mod ws;
 
 use axum::routing::{any, delete, get, patch, post, put};
@@ -20,6 +22,7 @@ pub fn router() -> Router<AppState> {
         // server
         .route("/server/health", get(server::health))
         .route("/server/info", get(server::info))
+        .route("/server/openapi.json", get(crate::openapi::openapi_json))
         // auth
         .route("/auth/login", post(auth::login))
         .route("/auth/refresh", post(auth::refresh))
@@ -39,7 +42,12 @@ pub fn router() -> Router<AppState> {
             "/items/:collection",
             get(items::list).post(items::create).patch(items::update_many).delete(items::delete_many),
         )
+        .route("/items/:collection/aggregate", post(items::aggregate_items))
         .route("/items/:collection/:id", get(items::get_one).patch(items::update).delete(items::delete_one))
+        .route("/items/:collection/:id/publish", post(items::publish_item))
+        .route("/items/:collection/:id/draft", delete(items::discard_draft))
+        .route("/items/:collection/:id/versions", get(items::list_content_versions))
+        .route("/items/:collection/:id/versions/:version_id/restore", post(items::restore_content_version))
         // data model
         .route("/collections", get(collections::list).post(collections::create))
         .route(
@@ -84,9 +92,26 @@ pub fn router() -> Router<AppState> {
         // graphql
         .route("/graphql", get(graphql::get).post(graphql::post))
         .route("/graphql/schema", get(graphql::schema_sdl))
+        // AI assistant
+        .route("/assistant/config", get(assistant::config))
+        .route("/assistant/chat", post(assistant::chat))
         // audit
         .route("/activity", get(items::activity))
         .route("/revisions", get(items::revisions))
+        // workspace (comments, notifications, presets, dashboard, insights)
+        .route("/comments/:id", patch(workspace::patch_comment).delete(workspace::delete_comment))
+        .route(
+            "/items/:collection/:id/comments",
+            get(workspace::list_item_comments).post(workspace::create_item_comment),
+        )
+        .route("/notifications", get(workspace::list_notifications))
+        .route("/notifications/read-all", post(workspace::mark_notifications_read_all))
+        .route("/notifications/:id/read", post(workspace::mark_notification_read))
+        .route("/presets", get(workspace::list_presets).post(workspace::create_preset))
+        .route("/presets/:id", patch(workspace::update_preset).delete(workspace::delete_preset))
+        .route("/dashboard", get(workspace::get_dashboard).put(workspace::put_dashboard))
+        .route("/insights", get(workspace::insights))
+        .route("/insights/recent-activity", get(workspace::recent_activity))
         // environment sync
         .route("/sync/export", post(sync::export))
         .route("/sync/missing-files", post(sync::missing_files))

@@ -1,6 +1,8 @@
-//! Ferro engine: everything that talks to PostgreSQL or to the file storage.
+//! Ferro engine: database backends (PostgreSQL primary), storage, items, auth, sync.
 
 pub mod activity;
+pub mod assistant;
+pub mod aggregate;
 pub mod auth;
 pub mod db;
 pub mod ddl;
@@ -18,6 +20,8 @@ pub mod schema_store;
 pub mod sync;
 pub mod tfa;
 pub mod translations;
+pub mod versioning;
+pub mod workspace;
 
 pub use error::{FerroError, Result};
 pub use permissions::Accountability;

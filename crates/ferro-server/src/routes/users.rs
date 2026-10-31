@@ -1,5 +1,5 @@
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, Uri};
 use axum::Json;
 use ferro_core::system::USERS;
 use ferro_engine::auth::{self, NewUser};
@@ -13,8 +13,13 @@ use super::items::{field_tree, list_collection, ItemsQuery};
 use crate::extract::Acc;
 use crate::{ApiError, ApiResult, AppState};
 
-pub async fn list(State(st): State<AppState>, Acc(acc): Acc, Query(q): Query<ItemsQuery>) -> ApiResult<Json<Value>> {
-    list_collection(&st, acc, USERS, &q).await
+pub async fn list(
+    State(st): State<AppState>,
+    Acc(acc): Acc,
+    uri: Uri,
+    Query(q): Query<ItemsQuery>,
+) -> ApiResult<Json<Value>> {
+    list_collection(&st, acc, USERS, &q, uri.query()).await
 }
 
 /// `GET /users/:id` — `me` returns the caller (always allowed when authenticated).

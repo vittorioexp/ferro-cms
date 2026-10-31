@@ -1,5 +1,7 @@
 # Tests
 
+Design and feature docs: **[docs/README.md](../docs/README.md)**.
+
 | Layer | Where | Run | Needs |
 |---|---|---|---|
 | Rust unit tests | `crates/*/src` | `cargo test --workspace` | Rust |
@@ -28,6 +30,9 @@ on any failure. Server logs: `target/e2e/*.log`.
 | `10-auth-sso` | single sign-on against a mock OpenID provider: PKCE, state cookie, open redirects, first sign-in rules (registration, domains, verified email, pre-created / invited / local / bound accounts), forged and replayed ID tokens (`none`, HMAC key confusion, wrong key / aud / iss / nonce / azp / expiry), key rotation, userinfo, OAuth 2.0 without an ID token, provider outages |
 | `11-auth-ldap` | directory login against a real LDAP server (ldapjs): search-then-bind, filter injection, empty-password pitfall, ambiguous entries, account binding by entryUUID, second factor, lockout, outages, `ldaps://` with and without certificate verification |
 | `12-translations` | guided set-up (dry run, validation, seeding), the composite UNIQUE constraint and 8 concurrent creates, writing by language code (partial update, null, unknown language, rollback, reserved keys, operations / array forms), reading with `lang` (fallback chain, per-field, defaults on the item, stable shape, lists, GraphQL), permissions on the translations collection, language lifecycle (RESTRICT / CASCADE), promotion with merge per language |
+| `13-versioning` | draft vs live reads/writes, publish (archives prior live), version restore into draft, discard, `version=draft` rejected without `meta.versioning`, schedule via `publish_at` + force publish |
+| `14-workspace` | item comments, notifications list, saved presets, dashboard layout, insights |
+| `15-api-platform` | OpenAPI document, REST aggregate (group_by + count), ETag when HTTP cache enabled |
 | `08-images` | resize, every fit mode, cover position, crop, JPEG / PNG / WebP output, quality, transparency, validation (17 invalid requests), non-images and corrupt files, a decompression bomb, permissions, `ETag` / `304`, a burst of 24 concurrent transformations; pixels are checked by decoding the real output |
 
 Storage suite: needs an S3-compatible server with a bucket, e.g. SeaweedFS (`weed server -s3 -s3.port=19000 -s3.config=s3.json`,

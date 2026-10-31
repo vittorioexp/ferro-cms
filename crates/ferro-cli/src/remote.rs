@@ -86,7 +86,8 @@ impl Remote {
         data(v)
     }
 
-    /// POST JSON, returning the raw JSON body (no `data` envelope).
+    /// POST JSON, returning the raw JSON body (no `data` envelope). Prefer [`post`](Self::post) for normal API responses.
+    #[allow(dead_code)]
     pub async fn post_raw<B: Serialize + ?Sized, T: DeserializeOwned>(&self, path: &str, body: &B) -> anyhow::Result<T> {
         let resp = self
             .http

@@ -1,8 +1,7 @@
 use axum::body::Body;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, ETAG, IF_NONE_MATCH, LOCATION};
-use axum::http::HeaderMap;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::Response;
 use axum::Json;
 use bytes::Bytes;
@@ -19,8 +18,13 @@ use super::items::{ctx, field_tree, list_collection, read_back, ItemsQuery};
 use crate::extract::Acc;
 use crate::{ApiError, ApiResult, AppState};
 
-pub async fn list(State(st): State<AppState>, Acc(acc): Acc, Query(q): Query<ItemsQuery>) -> ApiResult<Json<Value>> {
-    list_collection(&st, acc, FILES, &q).await
+pub async fn list(
+    State(st): State<AppState>,
+    Acc(acc): Acc,
+    uri: Uri,
+    Query(q): Query<ItemsQuery>,
+) -> ApiResult<Json<Value>> {
+    list_collection(&st, acc, FILES, &q, uri.query()).await
 }
 
 pub async fn get_one(State(st): State<AppState>, Acc(acc): Acc, Path(id): Path<String>, Query(q): Query<ItemsQuery>) -> ApiResult<Json<Value>> {
@@ -47,7 +51,7 @@ pub async fn upload(State(st): State<AppState>, Acc(acc): Acc, Query(q): Query<U
             st.storages.purge(&stale).await;
             let mut out = vec![];
             for id in &ids {
-                out.push(read_back(&st, &ctx, FILES, *id, None).await?);
+                out.push(read_back(&st, &ctx, FILES, *id, None, None).await?);
             }
             let data = if out.len() == 1 { out.remove(0) } else { Value::Array(out) };
             Ok(Json(json!({ "data": data })))
@@ -129,7 +133,7 @@ pub async fn update(State(st): State<AppState>, Acc(acc): Acc, Path(id): Path<Uu
     let mut tx = st.pool.begin().await?;
     items::update_one(&ctx, &mut tx, FILES, id, Value::Object(patch)).await?;
     tx.commit().await?;
-    Ok(Json(json!({ "data": read_back(&st, &ctx, FILES, id, None).await? })))
+    Ok(Json(json!({ "data": read_back(&st, &ctx, FILES, id, None, None).await? })))
 }
 
 pub async fn remove(State(st): State<AppState>, Acc(acc): Acc, Path(id): Path<Uuid>) -> ApiResult<StatusCode> {
@@ -289,8 +293,13 @@ pub async fn asset(
     builder.body(Body::from(data)).map_err(internal)
 }
 
-pub async fn list_folders(State(st): State<AppState>, Acc(acc): Acc, Query(q): Query<ItemsQuery>) -> ApiResult<Json<Value>> {
-    list_collection(&st, acc, FOLDERS, &q).await
+pub async fn list_folders(
+    State(st): State<AppState>,
+    Acc(acc): Acc,
+    uri: Uri,
+    Query(q): Query<ItemsQuery>,
+) -> ApiResult<Json<Value>> {
+    list_collection(&st, acc, FOLDERS, &q, uri.query()).await
 }
 
 pub async fn create_folder(State(st): State<AppState>, Acc(acc): Acc, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
@@ -298,5 +307,5 @@ pub async fn create_folder(State(st): State<AppState>, Acc(acc): Acc, Json(body)
     let mut tx = st.pool.begin().await?;
     let id = items::create_one(&ctx, &mut tx, FOLDERS, body).await?;
     tx.commit().await?;
-    Ok(Json(json!({ "data": read_back(&st, &ctx, FOLDERS, id, None).await? })))
+    Ok(Json(json!({ "data": read_back(&st, &ctx, FOLDERS, id, None, None).await? })))
 }

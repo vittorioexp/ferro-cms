@@ -19,6 +19,14 @@ function go(hash) {
 const listHash = (name) => `#/content/${encodeURIComponent(name)}`;
 const itemHash = (name, id) => `#/content/${encodeURIComponent(name)}/${encodeURIComponent(id)}`;
 
+function rememberCollection(name) {
+  try {
+    sessionStorage.setItem('ferro_content_collection', name);
+  } catch {
+    /* private mode */
+  }
+}
+
 function pickColumns(c) {
   const eligible = S.scalarFields(c).filter((f) => !['json', 'text', 'm2a_item'].includes(f.type) && !f.meta?.hidden);
   const cols = eligible.slice(0, 5);
@@ -46,6 +54,7 @@ export function renderCell(field, value) {
 }
 
 export async function contentList(root, { collection }) {
+  rememberCollection(collection);
   const c = S.getCollection(collection);
   if (!c) throw new Error(`Collection "${collection}" not found`);
   if (c.meta?.singleton) return singletonRedirect(collection);
@@ -201,6 +210,52 @@ export async function contentList(root, { collection }) {
     },
   });
 
+  let presets = [];
+  const presetHost = h('span', { class: 'preset-host' });
+
+  function applyPreset(p) {
+    if (!p?.layout) return;
+    state.sort = p.layout.sort || state.sort;
+    state.search = p.layout.search || '';
+    searchInput.value = state.search;
+    state.conds = (p.layout.conditions || []).map((c) => ({ ...c }));
+    drawConditions();
+    reload(1).catch(fail);
+  }
+
+  function drawPresetSelect() {
+    replace(
+      presetHost,
+      selectEl(
+        [{ value: '', label: 'Saved views…' }, ...presets.map((p) => ({ value: String(p.id), label: p.name + (p.shared ? ' (shared)' : '') }))],
+        '',
+        (id) => {
+          const p = presets.find((x) => String(x.id) === String(id));
+          if (p) applyPreset(p);
+        },
+      ),
+    );
+  }
+
+  async function loadPresets() {
+    const r = await api.get('/presets', { collection });
+    presets = r.data || [];
+    drawPresetSelect();
+  }
+
+  async function savePreset() {
+    const name = window.prompt('Name for this saved view (filters, sort, search)?');
+    if (!name?.trim()) return;
+    await api.post('/presets', {
+      collection,
+      name: name.trim(),
+      layout: { sort: state.sort, search: state.search, conditions: state.conds },
+      shared: false,
+    });
+    toast('View saved', 'ok');
+    await loadPresets();
+  }
+
   const banner = changeBanner('Refresh', () => reload(state.page));
   onLeave(
     realtime.subscribe(
@@ -221,6 +276,8 @@ export async function contentList(root, { collection }) {
       h('h1', {}, S.collectionLabel(c)),
       h('span', { class: 'spacer' }),
       searchInput,
+      presetHost,
+      button('Save view', () => savePreset().catch(fail), 'sm'),
       button(
         '+ Filter',
         () => {
@@ -237,6 +294,7 @@ export async function contentList(root, { collection }) {
     h('div', { class: 'table-wrap' }, h('table', {}, thead, tbody)),
     pager,
   );
+  await loadPresets();
   await reload(1);
 }
 
@@ -250,13 +308,18 @@ async function singletonRedirect(collection) {
 // ---------------------------------------------------------------------------
 
 export async function contentItem(root, { collection, id }) {
+  rememberCollection(collection);
   const c = S.getCollection(collection);
   if (!c) throw new Error(`Collection "${collection}" not found`);
+  const versioning = !!c.meta?.versioning?.enabled;
   const isNew = id === '+';
   let item = null;
+  let draftMeta = null;
   if (!isNew) {
-    const r = await api.get(`/items/${collection}/${id}`, { fields: S.editFieldsParam(collection) });
+    const params = { fields: S.editFieldsParam(collection), meta: versioning ? 'draft' : undefined, version: versioning ? 'draft' : undefined };
+    const r = await api.get(`/items/${collection}/${id}`, params);
     item = r.data;
+    draftMeta = r.meta?.draft;
   }
   const form = renderForm(collection, item);
   const singleton = !!c.meta?.singleton;
@@ -296,7 +359,8 @@ export async function contentItem(root, { collection, id }) {
       throw e;
     }
     savedAt = Date.now();
-    const r = isNew ? await api.post(`/items/${collection}`, payload) : await api.patch(`/items/${collection}/${id}`, payload);
+    const q = versioning ? { version: 'draft' } : {};
+    const r = isNew ? await api.post(`/items/${collection}`, payload, q) : await api.patch(`/items/${collection}/${id}`, payload, q);
     savedAt = Date.now();
     clearOptionCache();
     toast('Saved', 'ok');
@@ -312,11 +376,40 @@ export async function contentItem(root, { collection, id }) {
     await contentItem(root, { collection, id: savedId });
   }
 
-  const saveBtn = button('Save', () => busy(saveBtn, () => save(false)).catch(fail), 'primary');
-  const saveCloseBtn = singleton ? null : button('Save & close', () => busy(saveCloseBtn, () => save(true)).catch(fail));
+  const saveBtn = button(versioning ? 'Save draft' : 'Save', () => busy(saveBtn, () => save(false)).catch(fail), 'primary');
+  const saveCloseBtn = singleton ? null : button(versioning ? 'Save draft & close' : 'Save & close', () => busy(saveCloseBtn, () => save(true)).catch(fail));
+  const publishBtn =
+    !isNew && versioning
+      ? button('Publish now', () =>
+          busy(publishBtn, async () => {
+            if (!(await confirmDialog('Publish this draft to the live site?', { label: 'Publish' }))) return;
+            await api.post(`/items/${collection}/${id}/publish`, { force: true });
+            toast('Published', 'ok');
+            await rerender(id);
+          }).catch(fail),
+        )
+      : null;
+  const discardBtn =
+    !isNew && versioning && draftMeta?.has_draft
+      ? button('Discard draft', () =>
+          busy(discardBtn, async () => {
+            if (!(await confirmDialog('Discard unsaved draft changes?', { label: 'Discard', danger: true }))) return;
+            await api.del(`/items/${collection}/${id}/draft`);
+            toast('Draft discarded');
+            await rerender(id);
+          }).catch(fail),
+        )
+      : null;
+  const versionsBtn =
+    !isNew && versioning
+      ? button('Published versions', () => showContentVersions(collection, id).catch(fail))
+      : null;
   const actions = [
     saveBtn,
     saveCloseBtn,
+    publishBtn,
+    discardBtn,
+    versionsBtn,
     ...flowActions.map((fl) =>
       button(
         `▶ ${fl.name}`,
@@ -345,6 +438,7 @@ export async function contentItem(root, { collection, id }) {
       : null,
   ];
 
+  let commentsEl = null;
   add(root, 
     h(
       'div',
@@ -355,11 +449,54 @@ export async function contentItem(root, { collection, id }) {
       actions,
     ),
     banner.el,
+    versioning && !isNew
+      ? h(
+          'p',
+          { class: 'muted' },
+          draftMeta?.publish_at
+            ? `Draft · scheduled publish ${new Date(draftMeta.publish_at).toLocaleString()}`
+            : draftMeta?.has_draft
+              ? 'Draft saved · live content unchanged until you publish'
+              : 'Editing draft · live content unchanged until you publish',
+        )
+      : null,
     h('div', { class: 'card' }, form.el),
+    !isNew ? (commentsEl = h('div', { class: 'card' })) : null,
     item?.date_updated || item?.date_created
       ? h('p', { class: 'muted' }, `Last change: ${new Date(item.date_updated || item.date_created).toLocaleString()}`)
       : null,
   );
+
+  if (commentsEl) {
+    mountCommentsPanel(commentsEl, collection, id).catch(fail);
+  }
+}
+
+async function mountCommentsPanel(el, collection, id) {
+  if (!el) return;
+  const list = h('div', { class: 'comment-list' });
+  const input = h('textarea', { rows: 3, placeholder: 'Add a comment… Use @user-id to mention someone.' });
+  const post = button('Post comment', async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    await api.post(`/items/${collection}/${id}/comments`, { text });
+    input.value = '';
+    toast('Comment posted', 'ok');
+    await refresh();
+  }, 'primary sm');
+
+  async function refresh() {
+    const r = await api.get(`/items/${collection}/${id}/comments`);
+    replace(
+      list,
+      ...(r.data || []).map((c) =>
+        h('div', { class: 'comment' }, h('div', { class: 'muted small' }, new Date(c.date_created).toLocaleString()), h('p', {}, c.text)),
+      ),
+    );
+  }
+
+  replace(el, h('h3', {}, 'Comments'), list, input, h('div', { class: 'row-actions' }, post));
+  await refresh();
 }
 
 async function showRevisions(collection, id, c) {
@@ -410,6 +547,41 @@ async function showRevisions(collection, id, c) {
     body: rows.length
       ? h('table', {}, h('thead', {}, h('tr', {}, ['When', 'Action', 'Origin', 'Changes', ''].map((t) => h('th', {}, t)))), h('tbody', {}, rows))
       : h('p', { class: 'muted' }, 'No revisions recorded.'),
+    buttons: [{ label: 'Close' }],
+  });
+}
+
+async function showContentVersions(collection, id) {
+  const r = await api.get(`/items/${collection}/${id}/versions`);
+  const rows = (r.data || []).map((v) =>
+    h(
+      'tr',
+      {},
+      h('td', {}, `#${v.version_number}`),
+      h('td', {}, v.published_at ? new Date(v.published_at).toLocaleString() : ''),
+      h(
+        'td',
+        {},
+        button(
+          'Load into draft',
+          async () => {
+            if (!(await confirmDialog('Replace the current draft with this published version?', { label: 'Load' }))) return;
+            await api.post(`/items/${collection}/${id}/versions/${v.id}/restore`);
+            toast('Loaded into draft', 'ok');
+            dlg.close();
+            location.reload();
+          },
+          'sm',
+        ),
+      ),
+    ),
+  );
+  const dlg = modal({
+    title: 'Published versions',
+    wide: true,
+    body: rows.length
+      ? h('table', {}, h('thead', {}, h('tr', {}, ['Version', 'Published', ''].map((t) => h('th', {}, t)))), h('tbody', {}, rows))
+      : h('p', { class: 'muted' }, 'No published versions yet (versions are created when you publish a draft).'),
     buttons: [{ label: 'Close' }],
   });
 }

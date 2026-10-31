@@ -36,7 +36,7 @@ fn options(args: &ImportArgs) -> anyhow::Result<ImportOptions> {
 }
 
 async fn export_bundle(source: &Remote, sels: &[Selection]) -> anyhow::Result<Bundle> {
-    let bundle: Bundle = source.post_raw("/sync/export", &json!({ "selections": sels })).await?;
+    let bundle: Bundle = source.post("/sync/export", &json!({ "selections": sels })).await?;
     eprintln!(
         "exported {} items in {} collections and {} files from `{}`",
         bundle.item_count(),

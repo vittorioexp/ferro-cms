@@ -86,7 +86,7 @@ pub async fn diff(project: &Project, from: Option<String>, to: &str, exit_code: 
         Source::Path(p) => {
             let current = read_snapshot(p)?;
             let plan = diff_snapshots(&current, &desired);
-            let sql = plan_to_sql(&plan, &current).unwrap_or_default();
+        let sql = plan_to_sql(&plan, &current).unwrap_or_default();
             ApplyResult { plan, sql, applied: false }
         }
     };

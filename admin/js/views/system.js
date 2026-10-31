@@ -1,9 +1,10 @@
 // Environment (schema hash, history, compare / promote) and activity log.
 
 import { api, download } from '../api.js';
-import { add, applyWithPreview, button, fail, h, inputEl, labeled, replace, selectEl, toast } from '../dom.js';
+import { add, applyWithPreview, button, confirmDialog, fail, h, inputEl, labeled, replace, selectEl, toast } from '../dom.js';
 import * as S from '../schema.js';
 import { reloadCollections, session } from '../session.js';
+import { buildSelection, exportFromRemote, formatImportReport, importBundle, transferBundleFiles } from '../sync.js';
 import { shortId, truncate } from '../util.js';
 
 /** Plan + apply an arbitrary snapshot to this environment, with preview. */
@@ -21,6 +22,39 @@ export async function schemaView(root) {
   const history = await api.get('/schema/history', { limit: 30 });
 
   const remote = { url: '', token: '' };
+  const data = { collection: '', filter: '', strategy: 'overwrite', withDeps: true, prune: false };
+  const dataResult = h('pre', { class: 'result mono small' }, '');
+
+  async function runDataPromotion(dryRun) {
+    if (!remote.url || !remote.token) throw new Error('Source URL and administrator token are required');
+    if (!data.collection) throw new Error('Choose a collection to export');
+    let selection;
+    try {
+      selection = buildSelection(data.collection, data.filter, data.withDeps);
+    } catch (e) {
+      throw new Error(`Invalid filter JSON: ${e.message}`);
+    }
+    dataResult.textContent = dryRun ? 'Exporting from source (preview)…' : 'Exporting and promoting…';
+    const bundle = await exportFromRemote(remote.url, remote.token, [selection]);
+    const itemCount = Object.values(bundle.items || {}).reduce((n, arr) => n + (Array.isArray(arr) ? arr.length : 0), 0);
+    let transferred = 0;
+    if (!dryRun) transferred = await transferBundleFiles(remote.url, remote.token, bundle);
+    const report = await importBundle(bundle, {
+      strategy: data.strategy,
+      prune: data.prune,
+      dry_run: dryRun,
+      ignore_missing_fields: false,
+      force: false,
+    });
+    const head = dryRun
+      ? `Preview: ${itemCount} items, ${bundle.files?.length ?? 0} files in bundle.\n`
+      : `Transferred ${transferred} file(s).\n`;
+    dataResult.textContent = head + formatImportReport(report);
+    if (!dryRun && report.committed) toast('Content promotion applied', 'ok');
+    else if (report.ok && dryRun) toast('Dry run complete', 'ok');
+    else if (!report.ok) toast('Promotion finished with errors', 'warn');
+  }
+
   const compare = h(
     'div',
     { class: 'card' },
@@ -39,6 +73,57 @@ export async function schemaView(root) {
       },
       'primary',
     ),
+  );
+
+  const userCols = S.userCollections().filter((c) => !c.meta?.hidden && !c.sync?.exclude);
+  const withDepsBox = h('input', { type: 'checkbox', id: 'sync-deps' });
+  withDepsBox.checked = true;
+  withDepsBox.addEventListener('change', () => {
+    data.withDeps = withDepsBox.checked;
+  });
+  const pruneBox = h('input', { type: 'checkbox', id: 'sync-prune' });
+  pruneBox.addEventListener('change', () => {
+    data.prune = pruneBox.checked;
+  });
+  const dataPromo = h(
+    'div',
+    { class: 'card' },
+    h('h3', {}, 'Promote content from another server'),
+    h(
+      'p',
+      { class: 'muted' },
+      'Uses the source URL and token above. Exports items and file metadata, uploads missing binaries to this server, then imports. Same steps as ferro data push (see docs/DATA_SYNC.md).',
+    ),
+    labeled('Collection', selectEl(userCols.map((c) => ({ value: c.name, label: c.name })), '', (v) => (data.collection = v))),
+    labeled('Filter (JSON, optional)', inputEl('', (v) => (data.filter = v), { placeholder: '{"slug":{"_eq":"home"}}' })),
+    labeled(
+      'Strategy',
+      selectEl(
+        [
+          { value: 'overwrite', label: 'Overwrite' },
+          { value: 'safe', label: 'Safe (conflicts if edited here)' },
+          { value: 'insert-only', label: 'Insert only' },
+        ],
+        data.strategy,
+        (v) => (data.strategy = v),
+      ),
+    ),
+    h('label', { class: 'check' }, withDepsBox, ' Include related items (dependency closure)'),
+    h('label', { class: 'check' }, pruneBox, ' Prune owned children removed at source'),
+    h(
+      'div',
+      { class: 'row-actions' },
+      button('Preview (dry run)', () => runDataPromotion(true).catch(fail)),
+      button(
+        'Promote content + files',
+        async () => {
+          if (!(await confirmDialog('Import selected content and file assets into this environment?'))) return;
+          runDataPromotion(false).catch(fail);
+        },
+        'primary',
+      ),
+    ),
+    dataResult,
   );
 
   const file = h('input', {
@@ -84,6 +169,7 @@ export async function schemaView(root) {
       h('p', { class: 'muted' }, 'Same hash = same model and permissions. Commit the YAML (or use "ferro schema pull") to version it in git.'),
     ),
     compare,
+    dataPromo,
     h(
       'div',
       { class: 'card' },

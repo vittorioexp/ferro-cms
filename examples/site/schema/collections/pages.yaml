@@ -3,6 +3,9 @@ meta:
   icon: article
   display_template: "{{title}}"
   translations: { it-IT: Pagine, en-US: Pages }
+  versioning:
+    enabled: true
+    schedule_field: publish_at
 sync:
   natural_key: [slug]
 fields:
@@ -13,6 +16,7 @@ fields:
     unique: true
     validation: { _nempty: true }
   - { name: status, type: string, default: draft, indexed: true, meta: { interface: select-dropdown, options: { choices: [draft, published, archived] } } }
+  - { name: publish_at, type: datetime, meta: { interface: datetime, note: Schedule publish (draft workflow) } }
   - { name: seo, type: json }
   - { name: cover, type: file, meta: { interface: file-image } }
   - name: category

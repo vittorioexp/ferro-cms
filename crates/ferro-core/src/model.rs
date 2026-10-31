@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::database::DatabaseKind;
+
 pub const SNAPSHOT_VERSION: u32 = 1;
 /// Prefix reserved for system tables. User collections cannot use it.
 pub const SYSTEM_PREFIX: &str = "ferro_";
@@ -224,6 +226,25 @@ pub struct CollectionMeta {
     /// Store revisions (full item history) for this collection.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub revisions: bool,
+    /// Draft / publish workflow: edits can be saved as a draft without changing the live item.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub versioning: VersioningConfig,
+}
+
+/// When enabled, live reads use the main table; draft edits are stored separately until publish.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VersioningConfig {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Optional collection field (datetime) copied to the draft's scheduled publish time on save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_field: Option<String>,
+}
+
+impl Collection {
+    pub fn versioning_enabled(&self) -> bool {
+        self.meta.versioning.enabled
+    }
 }
 
 impl Default for CollectionMeta {
@@ -240,6 +261,7 @@ impl Default for CollectionMeta {
             group: None,
             translations: None,
             revisions: true,
+            versioning: VersioningConfig::default(),
         }
     }
 }
@@ -365,11 +387,44 @@ impl Field {
         })
     }
 
-    /// Type used in `CAST($n AS ...)` when binding values.
     pub fn cast_type(&self) -> String {
+        self.cast_type_for(DatabaseKind::Postgres)
+    }
+
+    pub fn cast_type_for(&self, kind: DatabaseKind) -> String {
+        if kind == DatabaseKind::Postgres {
+            return match self.ty {
+                FieldType::String | FieldType::Text => "text".into(),
+                _ => self.pg_type().unwrap_or_else(|| "text".into()),
+            };
+        }
         match self.ty {
-            FieldType::String | FieldType::Text => "text".into(),
-            _ => self.pg_type().unwrap_or_else(|| "text".into()),
+            FieldType::String | FieldType::Text | FieldType::Uuid | FieldType::M2o | FieldType::File | FieldType::M2aItem => {
+                "text".into()
+            }
+            FieldType::Integer => "integer".into(),
+            FieldType::BigInteger => "integer".into(),
+            FieldType::Float | FieldType::Decimal => "real".into(),
+            FieldType::Boolean => "integer".into(),
+            FieldType::Json => "text".into(),
+            FieldType::Date | FieldType::Datetime | FieldType::Time => "text".into(),
+            FieldType::O2m | FieldType::M2m | FieldType::M2a | FieldType::Translations => "text".into(),
+        }
+    }
+
+    pub fn sql_type(&self, kind: DatabaseKind) -> Option<String> {
+        match kind {
+            DatabaseKind::Postgres => self.pg_type(),
+            DatabaseKind::Sqlite | DatabaseKind::Mysql => {
+                self.pg_type().map(|t| {
+                    t.replace("jsonb", "TEXT")
+                        .replace("timestamptz", "TEXT")
+                        .replace("uuid", "TEXT")
+                        .replace("double precision", "REAL")
+                        .replace("bigint", "INTEGER")
+                        .replace("boolean", "INTEGER")
+                })
+            }
         }
     }
 }

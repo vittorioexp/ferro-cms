@@ -96,6 +96,10 @@ export async function modelCollection(root, { name }) {
     checkbox('Singleton', draft.meta.singleton, (v) => (draft.meta.singleton = v)),
     checkbox('Hidden in navigation', draft.meta.hidden, (v) => (draft.meta.hidden = v)),
     checkbox('Store revisions', draft.meta.revisions !== false, (v) => (draft.meta.revisions = v)),
+    checkbox('Draft / publish workflow', !!draft.meta.versioning?.enabled, (v) => {
+      draft.meta.versioning ||= {};
+      draft.meta.versioning.enabled = v;
+    }),
     checkbox('Never export in data promotion', draft.sync.exclude, (v) => (draft.sync.exclude = v)),
     checkbox('System fields (date_created, user_created, ...)', draft.system_fields !== false, (v) => (draft.system_fields = v)),
     h(
