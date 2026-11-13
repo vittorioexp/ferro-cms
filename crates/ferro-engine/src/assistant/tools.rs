@@ -1,4 +1,4 @@
-//! Assistant tools — all data access through `items` + permissions.
+//! Tools the model can call. Everything goes through `items`, so the caller's permissions apply.
 
 use ferro_core::fields::FieldTree;
 use ferro_core::{Action, Collection};
@@ -217,11 +217,7 @@ fn object_arg(args: &Value, key: &str) -> Result<Value> {
 }
 
 fn int_arg(v: Option<&Value>, default: i64, min: i64, max: i64) -> i64 {
-    let n = match v {
-        Some(Value::Number(num)) => num.as_i64().or_else(|| num.as_f64().map(|f| f as i64)).unwrap_or(default),
-        _ => default,
-    };
-    n.clamp(min, max)
+    v.and_then(Value::as_i64).unwrap_or(default).clamp(min, max)
 }
 
 pub async fn execute(pool: &PgPool, ctx: &Ctx, opts: &ChatOptions, name: &str, args: Value) -> Result<Value> {
@@ -294,8 +290,9 @@ pub async fn execute(pool: &PgPool, ctx: &Ctx, opts: &ChatOptions, name: &str, a
             }
             let collection = str_arg(&args, "collection")?;
             let data = object_arg(&args, "data")?;
-            let mut conn = pool.acquire().await?;
-            let id = items::create_one(ctx, &mut conn, &collection, data).await?;
+            let mut tx = pool.begin().await?;
+            let id = items::create_one(ctx, &mut tx, &collection, data).await?;
+            tx.commit().await?;
             Ok(json!({ "ok": true, "id": id.to_string() }))
         }
         "update_item" => {
@@ -306,8 +303,9 @@ pub async fn execute(pool: &PgPool, ctx: &Ctx, opts: &ChatOptions, name: &str, a
             let id = str_arg(&args, "id")?;
             let uuid = Uuid::parse_str(&id).map_err(|_| FerroError::invalid("invalid id uuid"))?;
             let data = object_arg(&args, "data")?;
-            let mut conn = pool.acquire().await?;
-            items::update_one(ctx, &mut conn, &collection, uuid, data).await?;
+            let mut tx = pool.begin().await?;
+            items::update_one(ctx, &mut tx, &collection, uuid, data).await?;
+            tx.commit().await?;
             Ok(json!({ "ok": true, "id": id }))
         }
         "delete_item" => {
@@ -317,8 +315,9 @@ pub async fn execute(pool: &PgPool, ctx: &Ctx, opts: &ChatOptions, name: &str, a
             let collection = str_arg(&args, "collection")?;
             let id = str_arg(&args, "id")?;
             let uuid = Uuid::parse_str(&id).map_err(|_| FerroError::invalid("invalid id uuid"))?;
-            let mut conn = pool.acquire().await?;
-            let n = items::delete_many(ctx, &mut conn, &collection, vec![uuid]).await?;
+            let mut tx = pool.begin().await?;
+            let n = items::delete_many(ctx, &mut tx, &collection, vec![uuid]).await?;
+            tx.commit().await?;
             Ok(json!({ "ok": true, "deleted": n }))
         }
         other => Err(FerroError::invalid(format!("unknown tool `{other}`"))),

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
-use crate::assistant::{floor_char_boundary, system_prompt, ChatOptions, ChatReply, ChatTurn, AssistantConfig};
+use crate::assistant::{system_prompt, AssistantConfig, ChatOptions, ChatReply, ChatTurn};
 use crate::assistant::tools::{self, execute};
 use crate::items::Ctx;
 use crate::schema::Schema;
@@ -77,7 +77,7 @@ pub async fn run(
     user_messages: Vec<ChatTurn>,
     opts: ChatOptions,
 ) -> Result<ChatReply> {
-    let sys = system_prompt(&schema, &ctx, &opts.context, opts.allow_writes);
+    let sys = system_prompt(&schema, &ctx, opts.collection.as_deref(), opts.allow_writes);
     let mut oai_messages: Vec<OaiMessage> = vec![OaiMessage {
         role: "system".into(),
         content: Some(sys),
@@ -152,15 +152,9 @@ pub async fn run(
                         Ok(v) => v,
                         Err(e) => json!({ "error": true, "message": e.to_string() }),
                     };
-                    let mut content = serde_json::to_string(&result).unwrap_or_else(|_| result.to_string());
-                    const MAX_TOOL: usize = 14_000;
-                    if content.len() > MAX_TOOL {
-                        content.truncate(floor_char_boundary(&content, MAX_TOOL));
-                        content.push_str("…");
-                    }
                     oai_messages.push(OaiMessage {
                         role: "tool".into(),
-                        content: Some(content),
+                        content: Some(result.to_string()),
                         tool_calls: None,
                         tool_call_id: Some(tool_id),
                     });

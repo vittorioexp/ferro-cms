@@ -22,7 +22,6 @@ pub fn router() -> Router<AppState> {
         // server
         .route("/server/health", get(server::health))
         .route("/server/info", get(server::info))
-        .route("/server/openapi.json", get(crate::openapi::openapi_json))
         // auth
         .route("/auth/login", post(auth::login))
         .route("/auth/refresh", post(auth::refresh))

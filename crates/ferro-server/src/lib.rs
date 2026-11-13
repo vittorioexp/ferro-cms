@@ -5,7 +5,6 @@ mod extract;
 mod http_cache;
 mod login_guard;
 mod middleware;
-mod openapi;
 mod rate_limit;
 mod routes;
 
@@ -40,7 +39,6 @@ pub fn with_token(base: &str, token: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub database_kind: Option<String>,
     pub database_url: String,
     pub bind: String,
     pub secret: String,
@@ -115,7 +113,6 @@ impl Config {
             anyhow::bail!("FERRO_SECRET must be at least 32 characters");
         }
         Ok(Config {
-            database_kind: env_opt("FERRO_DATABASE_KIND"),
             database_url: env_opt("FERRO_DATABASE_URL").context("FERRO_DATABASE_URL is required")?,
             bind: env_or("FERRO_BIND", "0.0.0.0:8055"),
             secret,
@@ -282,13 +279,8 @@ async fn shutdown_signal() {
 
 pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     ferro_identity::install_crypto_provider();
-    let pool = db::connect(
-        &config.database_url,
-        config.database_kind.as_deref(),
-        config.db_max_connections,
-    )
-    .await
-    .context("database connection")?;
+    let pool = db::connect(&config.database_url, config.db_max_connections).await.context("database connection")?;
+    db::migrate_system(&pool).await.context("system migrations")?;
     schema_store::bootstrap(&pool, config.admin_email.as_deref(), config.admin_password.as_deref())
         .await
         .context("bootstrap")?;
@@ -336,6 +328,19 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     tracing::info!(env = %state.config.env_name, hash = %state.schema.get().hash, "schema loaded");
     tokio::spawn(listen_schema_changes(state.clone()));
     tokio::spawn(ferro_engine::realtime::run_listener(state.pool.clone(), state.hub.clone()));
+    if state.http_cache.enabled() {
+        // writes on any instance (and scheduled publishing) reach every cache through the realtime channel
+        let for_cache = state.clone();
+        let mut events = state.hub.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => for_cache.http_cache.invalidate(),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
     ferro_engine::flows::init(ferro_engine::flows::Runtime::new(state.config.flow_allow_private, state.config.flow_allowed_hosts.clone()));
     let for_worker = state.clone();
     tokio::spawn(ferro_engine::flows::run_worker(state.pool.clone(), Arc::new(move || for_worker.schema.get())));
@@ -352,6 +357,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(&bind).await.with_context(|| format!("bind {bind}"))?;
     tracing::info!("Ferro listening on http://{bind}");
-    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
 }

@@ -481,6 +481,11 @@ In one transaction with deferred constraints:
 For each item that is not unchanged, the report contains the action and the
 field-by-field differences (before/after), plus the source id if it was remapped.
 
+`POST /sync/import` takes `{ bundle, options }` with `options` =
+`{ strategy, prune, dry_run, ignore_missing_fields, force }` (`overwrite` and `false`
+by default); the CLI flags are the same with dashes (`--dry-run`). `ignore_missing_fields` drops fields the
+target schema does not have instead of failing.
+
 ### 7.5 Commands
 
 ```bash
@@ -523,11 +528,24 @@ Response format `{ "data": …, "meta": … }`, errors
 with `*` return the list of ids; with a sub-tree they return the objects. For M2A
 the sub-tree applies to every target collection (non-existent fields are ignored).
 
-**filter** (JSON in `filter=`, or bracket query `filter[field][_op]=value`): `_eq _neq _lt _lte _gt _gte _in _nin _null _nnull _empty _nempty
+**filter**: `_eq _neq _lt _lte _gt _gte _in _nin _null _nnull _empty _nempty
 _contains _ncontains _icontains _nicontains _starts_with _nstarts_with _istarts_with
 _ends_with _nends_with _iends_with _between _nbetween`, logical `_and _or`,
 relational `{ author: { name: { _eq: … } } }` (m2o), `{ blocks: { _some: … } }` /
 `_none` (o2m). Variables: `$CURRENT_USER`, `$CURRENT_ROLE`, `$NOW`.
+
+A filter is passed as JSON (`filter={"status":{"_eq":"published"}}`) or, as in Directus,
+with bracket parameters:
+
+```
+GET /items/pages?filter[status][_eq]=published&filter[slug][_eq]=home
+GET /items/pages?filter[status][_in][0]=draft&filter[status][_in][1]=review
+```
+
+Bracket values stay strings, except `true`, `false`, `null` and inline JSON arrays or
+objects; the SQL cast types them. When both forms are present they are combined with
+`_and`. Bracket filters allow at most 16 levels and list indexes below 1000; beyond that
+the request gets a 400 (use the JSON form for long lists).
 
 **Nested writes**:
 
@@ -566,6 +584,8 @@ Everything runs in one transaction, with permissions checked at every level.
 | Sync | `POST /sync/export`, `POST /sync/missing-files`, `GET/PUT /sync/files/:id`, `POST /sync/import`, `DELETE /sync/state` |
 | GraphQL | `POST /graphql`, `GET /graphql?query=…` (queries only), `GET /graphql/schema` (SDL), see §8.3 |
 | Realtime | `GET /websocket` (WebSocket), see §8.5 |
+| Workspace | `/items/:collection/:id/comments`, `/comments/:id`, `/notifications`, `/presets`, `/dashboard`, `/insights` (§8.7) |
+| Assistant | `GET /assistant/config`, `POST /assistant/chat` (§8.8) |
 | Server | `GET /server/health`, `GET /server/info` |
 
 ### 8.3 GraphQL
@@ -763,50 +783,89 @@ typing; the user's own save does not produce the notice. Extensions use
 
 ### 8.6 Content versioning (draft / publish)
 
-Collections with `meta.versioning.enabled: true` keep **live** rows in the normal
-table and store work-in-progress copies in `ferro_item_drafts`. Each successful
-publish archives the previous live snapshot in `ferro_item_versions`.
+Collections with `meta.versioning.enabled: true` keep live rows in their table and
+work in progress in `ferro_item_drafts`. Each publish archives the previous live item
+in `ferro_item_versions`.
 
-| Mechanism | Behaviour |
+- Reads take `?version=published` (default) or `?version=draft`. A draft read is the
+  live item with the draft's fields laid over it, limited to the fields asked for; with
+  no draft it is the live item.
+- `PATCH …?version=draft` saves a draft and leaves the live item alone. A draft holds
+  only the fields it changed, each replaced whole as in a PATCH (JSON fields too). Live
+  edits made after the draft therefore survive publishing, and the publisher only needs
+  update permission on the changed fields.
+- `POST /items/:collection/:id/publish` applies the draft; `{ "publish_at": "<RFC 3339>" }`
+  schedules it instead, and `{ "force": true }` publishes a scheduled draft now.
+  `DELETE …/draft` discards it.
+- `GET …/versions` lists the archived versions; `POST …/versions/:versionId/restore`
+  loads one into the draft.
+- `meta.versioning.schedule_field` (a datetime field) sets the publish time from the
+  draft when a save includes it; saves without it keep the current schedule. A worker
+  publishes due drafts every 30 seconds.
+
+Deleting an item deletes its draft. Drafts stay in their environment: they are not part
+of data bundles. Publishing goes through the normal update, so permissions, flows and
+realtime events apply.
+
+### 8.7 Admin workspace
+
+Migration 5 adds the tables behind comments, notifications, saved views and the
+dashboard. Every route needs a signed-in user with app access.
+
+| Feature | Endpoints |
 |---|---|
-| Reads | `?version=published` (default) or `?version=draft`; without a draft, draft reads fall back to live |
-| Writes | `?version=draft` saves the draft only; omit `version` to change live (same as before) |
-| Publish | `POST /items/:collection/:id/publish` — body `{ "force": true }` or `{ "publish_at": "<RFC3339>" }` to schedule |
-| Discard | `DELETE /items/:collection/:id/draft` |
-| History | `GET /items/:collection/:id/versions`, `POST …/versions/:versionId/restore` (loads into draft) |
-| Schedule | Optional `meta.versioning.schedule_field` (datetime); copied from the draft payload on save. A background worker publishes due drafts every 30 s |
+| Comments (`ferro_comments`, optional `parent` for threads) | `GET/POST /items/:collection/:id/comments`, `PATCH/DELETE /comments/:id` |
+| Notifications (`ferro_notifications`) | `GET /notifications`, `POST /notifications/:id/read`, `POST /notifications/read-all` |
+| Presets, i.e. saved list views (`ferro_presets`) | `GET/POST /presets`, `PATCH/DELETE /presets/:id` |
+| Dashboard (`ferro_dashboards`, one layout per user) | `GET/PUT /dashboard` |
+| Insights | `GET /insights` (item counts where reading is unrestricted, unread notifications, 7 days of activity for admins), `GET /insights/recent-activity` |
 
-Drafts are **not** exported in data sync bundles (environment-local editing). Publishing
-uses the same nested-write pipeline, permissions, flows and realtime events as a normal
-update.
+Commenting needs read permission on the item. A comment notifies the author of the
+parent comment and the users mentioned as `@<uuid>` (at most 20), but only active users
+with app access who can read the item, since the notification quotes the comment. A
+shared preset is visible to the other app users of the collection; only its owner can
+change it.
 
-### 8.7 Admin workspace (comments, notifications, dashboard, insights, presets)
+### 8.8 Assistant
 
-System migration **v5** adds tables for collaboration and personalisation in the admin app. All routes require a signed-in user with **app access** (`app_access` on a policy).
+An optional chat in the Admin UI (`#/assistant`) that reads and changes content through
+an OpenAI-compatible chat API (OpenAI, Azure OpenAI, a local server). It is enabled
+with `FERRO_AI_ENABLED=true` and `FERRO_AI_API_KEY`; `FERRO_AI_BASE_URL` (default
+`https://api.openai.com/v1`), `FERRO_AI_MODEL` (default `gpt-4o-mini`) and
+`FERRO_AI_MAX_ROUNDS` (tool calls per message, default 12, at most 32) are optional.
 
-| Feature | Storage | API |
-|---|---|---|
-| **Comments** | `ferro_comments` (per collection + item, optional `parent` thread) | `GET/POST /items/:collection/:id/comments`, `PATCH/DELETE /comments/:id` |
-| **Notifications** | `ferro_notifications` (per recipient) | `GET /notifications`, `POST /notifications/:id/read`, `POST /notifications/read-all` |
-| **Presets** (saved list views) | `ferro_presets` (`layout`: sort, search, filter conditions) | `GET/POST /presets`, `PATCH/DELETE /presets/:id` |
-| **Dashboard** | `ferro_dashboards` (one row per user, JSON `layout.panels`) | `GET/PUT /dashboard` |
-| **Insights** | computed | `GET /insights` (collection counts where read is unrestricted, unread count, 7-day activity for admins), `GET /insights/recent-activity` |
+`GET /assistant/config` tells the UI whether it is available; `POST /assistant/chat`
+takes `{ messages, allow_writes, context: { collection } }` and answers with the reply
+and the tools it ran (503 when the assistant is not configured). The model has these
+tools: `list_collections`, `describe_collection`, `list_items` (at most 50),
+`get_item`, `create_item`, `update_item`, `delete_item`.
 
-Comments require **read** permission on the target item. Creating a comment notifies the parent comment's author and any `@uuid` mentions in the text. Item deletes cascade comments. Presets can be marked `shared` so other app users on the same collection can load them; only the owner can edit or delete.
+Every tool runs with the permissions of the signed-in user, and writes run in a
+transaction like REST writes. The three write tools only work when the request has
+`allow_writes: true` (a checkbox in the UI). The assistant cannot change the model,
+users or flows. Content read by the tools is sent to the configured provider: keep that
+in mind for personal data.
 
-The admin UI uses these endpoints for the home **dashboard**, the notification bell, **saved views** on collection lists, and a **comments** panel on item pages.
+### 8.9 Aggregations, rate limiting, HTTP cache
 
-### 8.9 Aggregations, rate limiting, HTTP cache, OpenAPI, SDK
+`POST /items/:collection/aggregate` takes `filter`, `search`, an optional `group_by`
+list and `ops` (`{ "alias", "function": "count|sum|avg|min|max", "field" }`), with the
+same read permissions as a list. GraphQL has `<collection>_count` for plain counts.
 
-| Feature | Behaviour |
-|---|---|
-| **Aggregations** | `POST /items/:collection/aggregate` with `filter`, `search`, optional `group_by[]`, and `ops[]` (`function`: `count`, `sum`, `avg`, `min`, `max`; `alias`; optional `field`). Respects the same read permissions and filters as list/count. |
-| **Rate limiting** | Optional per-instance fixed window: `FERRO_RATE_LIMIT_RPM` (0 = off). Keys: authenticated user id, else client IP. Returns **429** with `Retry-After`. |
-| **HTTP cache** | Optional in-memory cache for **GET** `/items/{collection}` and **GET** `/items/{collection}/{id}` only (not `?version=draft`, not subpaths like `/versions`): `FERRO_HTTP_CACHE_TTL`, `FERRO_HTTP_CACHE_MAX_ENTRIES`. Adds `Cache-Control: private` and **ETag**; honors `If-None-Match` → **304**. Cache key includes schema hash, a fingerprint of the bearer token (`Authorization: Bearer …` or `?access_token=`), and the full URI (so different users do not share entries). |
-| **OpenAPI** | `GET /server/openapi.json` — OpenAPI 3.1 subset of core routes. |
-| **SDK** | `sdk/javascript` — `FerroClient` with `items`, `aggregate`, `login`, `openapi()`. |
+`FERRO_RATE_LIMIT_RPM` (default 0, off) limits requests per minute and instance. The
+key is the user of a valid JWT access token (checked without a database query), or else
+the client address (`X-Forwarded-For`, or the TCP peer). Static tokens count against
+their address. Over the limit the answer is 429 with `Retry-After`.
 
-GraphQL already exposes `<collection>_count` for simple counts; use REST aggregate for **group_by** and numeric **sum/avg/min/max**.
+`FERRO_HTTP_CACHE_TTL` (default 0, off) and `FERRO_HTTP_CACHE_MAX_ENTRIES` turn on an
+in-memory cache of `GET /items/:collection` and `GET /items/:collection/:id`, except
+draft reads. The key is the schema hash, a fingerprint of the token and the full URL,
+so users never share entries. Responses over 512 KB are not cached. Every write request
+to the instance (except `/auth/*` and aggregations) and every realtime change event
+empties the cache, so writes on other instances and scheduled publishing invalidate it
+as well; changes to users or roles made on another instance can take up to the TTL to
+show. Responses carry `Cache-Control: private, no-cache` and an `ETag`, so browsers
+revalidate each time and get a 304 when nothing changed.
 
 ## 9. Authentication and permissions
 
@@ -1078,7 +1137,6 @@ ferro data export     --from dev --select … --out dir
 ferro data import     --to prod --bundle dir [--strategy …] [--prune] [--dry-run] [--force] [--yes]
 ferro data diff       --from dev --to prod --select … [--exit-code] [--report f.html]
 ferro data push       --from dev --to prod --select … [import options]
-See [DATA_SYNC.md](./DATA_SYNC.md) for promotion flow and **file asset transfer** (CLI + admin Environment).
 ferro storage list                            configured locations, files and bytes per location
 ferro storage check [--exit-code]             write probe + every file exists where its row says (exit 2 if one is missing)
 ferro storage migrate --from local --to s3 [--delete-source] [--dry-run]
@@ -1090,7 +1148,8 @@ ferro user reset-tfa  --email …               remove a user's second factor (d
 
 `--from`/`--to` accept the name of an environment in `ferro.toml` or a path (a
 schema directory or a `.yaml`/`.json` file). Exit codes: `0` ok, `1` error, `2`
-differences found (with `--exit-code`, for pipelines).
+differences found (with `--exit-code`, for pipelines). Content promotion, step by
+step: [DATA_SYNC.md](./DATA_SYNC.md).
 
 `ferro.toml`:
 
@@ -1135,8 +1194,7 @@ Jenkins example: see [`deploy/Jenkinsfile.example`](../deploy/Jenkinsfile.exampl
 
 | Variable | Default | |
 |---|---|---|
-| `FERRO_DATABASE_URL` | — | required (see [DATABASES.md](DATABASES.md)) |
-| `FERRO_DATABASE_KIND` | — | optional when URL scheme is unknown: `postgres`, `sqlite`, `mysql` |
+| `FERRO_DATABASE_URL` | — | required, `postgres://…` |
 | `FERRO_SECRET` | — | required, ≥ 32 characters |
 | `FERRO_ENV` | `local` | name of the environment (bundles, reports) |
 | `FERRO_BIND` | `0.0.0.0:8055` | |
@@ -1158,11 +1216,7 @@ Jenkins example: see [`deploy/Jenkinsfile.example`](../deploy/Jenkinsfile.exampl
 | `FERRO_RATE_LIMIT_RPM` | 0 | max API requests per user/IP per minute (0 = off) |
 | `FERRO_HTTP_CACHE_TTL` | 0 | GET `/items/*` JSON cache TTL in seconds (0 = off) |
 | `FERRO_HTTP_CACHE_MAX_ENTRIES` | 512 | max cached GET responses per instance |
-| `FERRO_AI_ENABLED` | false | enable `/assistant/*` (requires API key); see [AI_ASSISTANT.md](./AI_ASSISTANT.md) |
-| `FERRO_AI_API_KEY` | — | bearer token for OpenAI-compatible chat API |
-| `FERRO_AI_BASE_URL` | `https://api.openai.com/v1` | chat completions base URL |
-| `FERRO_AI_MODEL` | `gpt-4o-mini` | model id |
-| `FERRO_AI_MAX_ROUNDS` | 12 (clamped 1–32) | max tool-call loops per chat request |
+| `FERRO_AI_ENABLED`, `_API_KEY`, `_BASE_URL`, `_MODEL`, `_MAX_ROUNDS` | `false`, —, OpenAI, `gpt-4o-mini`, 12 | the assistant (§8.8) |
 | `FERRO_ADMIN_EMAIL` / `FERRO_ADMIN_PASSWORD` | — | first administrator, if no users exist |
 | `FERRO_CORS_ORIGINS` | — | comma-separated list, or `*` |
 | `FERRO_ADMIN_DIR` | — | static Admin UI build, served on `/admin` |
@@ -1241,8 +1295,7 @@ Suggested plan (the **model** converter exists; the **data** converter is on the
 The [`admin/`](../admin/) folder: a SPA in **plain JavaScript** (ES modules, no
 dependencies, no build). The server serves it on `/admin` when `FERRO_ADMIN_DIR` is
 set; it uses only the public API. To develop against another server:
-`/admin/?api=https://host` (the other server needs CORS). Route map and features:
-[ADMIN.md](./ADMIN.md).
+`/admin/?api=https://host` (the other server needs CORS).
 
 | Section | What it does |
 |---|---|
@@ -1257,8 +1310,9 @@ set; it uses only the public API. To develop against another server:
 | Users | Users, roles, status, password, API token generation; **invite by email** (or get the link when Ferro cannot send mail); sign-in method and 2FA columns; remove someone's second factor |
 | My account | Who am I, how I sign in; set up two-factor authentication (QR code, manual key, recovery codes) and turn it off |
 | Sign-in | Email + password, a code step for two-factor accounts, "Forgot your password?", one button per single sign-on provider; the reset-password, invitation and sign-in-return pages (`#/reset`, `#/invite`, `#/sso`) work before anybody is signed in |
-| Environment | Name and schema hash, change history, YAML snapshot download, **alignment to another environment** (URL + token) or to a JSON snapshot, always with a preview; **promote content** (export → transfer file binaries → import) using the same source credentials — see [DATA_SYNC.md](./DATA_SYNC.md) |
-| Assistant | Natural-language chat over CMS data (read by default; optional writes with confirmation in UI). Requires `FERRO_AI_*` on the server — see [AI_ASSISTANT.md](./AI_ASSISTANT.md) |
+| Home | Dashboard: insights, recent activity, collections, notifications; a notification bell in the header |
+| Environment | Name and schema hash, change history, YAML snapshot download, **alignment to another environment** (URL + token) or to a JSON snapshot, always with a preview; content promotion from another server with the same credentials (export, file transfer, import; see [DATA_SYNC.md](./DATA_SYNC.md)) |
+| Assistant | Chat over the content (§8.8); writes only with the "allow writes" box ticked |
 | Activity | Audit by collection/action |
 
 Security: all text is inserted as text nodes (never `innerHTML`); the refresh token
@@ -1314,19 +1368,19 @@ services through `request`); arbitrary Rust code has to be compiled into the bin
 - Sync: export with dependency closure, import with compatibility checks, natural
   keys, strategies, prune, FK verification, dry run, HTML/JSON reports
 - CLI for all the environment operations
-- Admin UI (see §15) including **Environment data promotion** and optional **AI assistant**
+- Admin UI (see §15), with content promotion, comments, saved views and the optional assistant
 - GraphQL (queries and mutations, unions for M2A blocks, generated SDL; see §8.3)
 - Realtime over WebSocket with per-client permissions and propagation between
   instances (§8.5)
 - Flows (webhooks, blocking and non-blocking hooks, scheduled jobs, custom endpoints,
   manual actions; §8.4) and Admin UI extensions (§15)
-- **Content versioning**: draft/live split, published snapshots, programmatic and
-  scheduled publish (§8.6)
+- Drafts and scheduled publishing (§8.6), aggregations, rate limiting and a response
+  cache (§8.9)
 
 ### Known limits
 
-- **State of verification** (2026-10-09): the workspace builds without warnings;
-  119 Rust tests, 58 Admin UI tests, **734 integration checks** over several environments
+- **State of verification** (2026-11-13): the workspace builds without warnings;
+  143 Rust tests, 60 Admin UI tests, **735 integration checks** over several environments
   with a real PostgreSQL 16 (schema, sync, flows, GraphQL, security, realtime —
   including two instances on the same database — storage against an
   S3-compatible server, image transformations checked pixel by pixel, translations, and the identity flows — two-factor, password reset, invitations, single
@@ -1362,7 +1416,11 @@ services through `request`); arbitrary Rust code has to be compiled into the bin
   the codes you list, with no implicit default language other than the item's own fields. The `translations` interface of
   extensions and GraphQL write paths use the generic nested-write format. A translations field needs a languages collection
   keyed by a string code; languages themselves are not translated.
-- List filters: JSON `filter={…}` **or** Directus-style bracket params (`filter[status][_eq]=published`, `_and` / `_or` indices, `_in` arrays). Both can be combined (`_and`). GraphQL still uses JSON variables only.
+- Bracket filters (§8.1) exist only on REST; GraphQL takes JSON variables.
+- Drafts: a new item created with `?version=draft` is live at once (there is nothing to
+  hide it behind), and lists ignore `version=draft`. A relation changed in a draft is
+  read back as the bare id, not expanded with `fields=`; the example project therefore
+  keeps versioning off.
 - Binaries are held in memory during upload/sync (fine up to a few hundred MB per file).
 - Prune does not delete M2A items left orphaned after their junction row is removed
   (as in Directus).

@@ -22,10 +22,6 @@ impl RateLimiter {
         RateLimiter { entries: Mutex::new(HashMap::new()), max, window }
     }
 
-    pub fn disabled() -> Self {
-        Self::new(0, Duration::from_secs(60))
-    }
-
     pub fn enabled(&self) -> bool {
         self.max > 0
     }

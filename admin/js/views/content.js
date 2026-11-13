@@ -19,13 +19,8 @@ function go(hash) {
 const listHash = (name) => `#/content/${encodeURIComponent(name)}`;
 const itemHash = (name, id) => `#/content/${encodeURIComponent(name)}/${encodeURIComponent(id)}`;
 
-function rememberCollection(name) {
-  try {
-    sessionStorage.setItem('ferro_content_collection', name);
-  } catch {
-    /* private mode */
-  }
-}
+// The assistant uses it as context.
+const rememberCollection = (name) => sessionStorage.setItem('ferro_content_collection', name);
 
 function pickColumns(c) {
   const eligible = S.scalarFields(c).filter((f) => !['json', 'text', 'm2a_item'].includes(f.type) && !f.meta?.hidden);
@@ -378,38 +373,34 @@ export async function contentItem(root, { collection, id }) {
 
   const saveBtn = button(versioning ? 'Save draft' : 'Save', () => busy(saveBtn, () => save(false)).catch(fail), 'primary');
   const saveCloseBtn = singleton ? null : button(versioning ? 'Save draft & close' : 'Save & close', () => busy(saveCloseBtn, () => save(true)).catch(fail));
-  const publishBtn =
-    !isNew && versioning
-      ? button('Publish now', () =>
-          busy(publishBtn, async () => {
-            if (!(await confirmDialog('Publish this draft to the live site?', { label: 'Publish' }))) return;
-            await api.post(`/items/${collection}/${id}/publish`, { force: true });
-            toast('Published', 'ok');
-            await rerender(id);
-          }).catch(fail),
-        )
-      : null;
-  const discardBtn =
-    !isNew && versioning && draftMeta?.has_draft
-      ? button('Discard draft', () =>
-          busy(discardBtn, async () => {
-            if (!(await confirmDialog('Discard unsaved draft changes?', { label: 'Discard', danger: true }))) return;
-            await api.del(`/items/${collection}/${id}/draft`);
-            toast('Draft discarded');
-            await rerender(id);
-          }).catch(fail),
-        )
-      : null;
-  const versionsBtn =
-    !isNew && versioning
-      ? button('Published versions', () => showContentVersions(collection, id).catch(fail))
-      : null;
+  const draftActions = [];
+  if (versioning && !isNew) {
+    const publishBtn = button('Publish now', () =>
+      busy(publishBtn, async () => {
+        if (!(await confirmDialog('Publish this draft to the live site?', { label: 'Publish' }))) return;
+        await api.post(`/items/${collection}/${id}/publish`, { force: true });
+        toast('Published', 'ok');
+        await rerender(id);
+      }).catch(fail),
+    );
+    draftActions.push(publishBtn);
+    if (draftMeta?.has_draft) {
+      const discardBtn = button('Discard draft', () =>
+        busy(discardBtn, async () => {
+          if (!(await confirmDialog('Discard unsaved draft changes?', { label: 'Discard', danger: true }))) return;
+          await api.del(`/items/${collection}/${id}/draft`);
+          toast('Draft discarded');
+          await rerender(id);
+        }).catch(fail),
+      );
+      draftActions.push(discardBtn);
+    }
+    draftActions.push(button('Published versions', () => showContentVersions(collection, id, () => rerender(id)).catch(fail)));
+  }
   const actions = [
     saveBtn,
     saveCloseBtn,
-    publishBtn,
-    discardBtn,
-    versionsBtn,
+    ...draftActions,
     ...flowActions.map((fl) =>
       button(
         `▶ ${fl.name}`,
@@ -473,7 +464,6 @@ export async function contentItem(root, { collection, id }) {
 }
 
 async function mountCommentsPanel(el, collection, id) {
-  if (!el) return;
   const list = h('div', { class: 'comment-list' });
   const input = h('textarea', { rows: 3, placeholder: 'Add a comment… Use @user-id to mention someone.' });
   const post = button('Post comment', async () => {
@@ -551,7 +541,7 @@ async function showRevisions(collection, id, c) {
   });
 }
 
-async function showContentVersions(collection, id) {
+async function showContentVersions(collection, id, reload) {
   const r = await api.get(`/items/${collection}/${id}/versions`);
   const rows = (r.data || []).map((v) =>
     h(
@@ -569,7 +559,7 @@ async function showContentVersions(collection, id) {
             await api.post(`/items/${collection}/${id}/versions/${v.id}/restore`);
             toast('Loaded into draft', 'ok');
             dlg.close();
-            location.reload();
+            await reload();
           },
           'sm',
         ),

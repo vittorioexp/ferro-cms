@@ -86,20 +86,6 @@ impl Remote {
         data(v)
     }
 
-    /// POST JSON, returning the raw JSON body (no `data` envelope). Prefer [`post`](Self::post) for normal API responses.
-    #[allow(dead_code)]
-    pub async fn post_raw<B: Serialize + ?Sized, T: DeserializeOwned>(&self, path: &str, body: &B) -> anyhow::Result<T> {
-        let resp = self
-            .http
-            .post(self.endpoint(path))
-            .bearer_auth(&self.token)
-            .json(body)
-            .send()
-            .await
-            .with_context(|| format!("[{}] POST {path}", self.name))?;
-        Ok(self.check(resp, &format!("POST {path}")).await?.json().await?)
-    }
-
     pub async fn get_bytes(&self, path: &str) -> anyhow::Result<Bytes> {
         let resp = self
             .http

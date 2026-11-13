@@ -1,5 +1,3 @@
-//! Admin workspace API: comments, notifications, presets, dashboard, insights.
-
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -9,12 +7,8 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::extract::Acc;
-use crate::routes::items::{self, parse_id};
+use crate::routes::items::{ctx, parse_id};
 use crate::{ApiResult, AppState};
-
-fn ctx(st: &AppState, acc: ferro_engine::Accountability) -> ferro_engine::items::Ctx {
-    items::ctx(st, acc)
-}
 
 #[derive(Debug, Deserialize)]
 pub struct LimitQuery {

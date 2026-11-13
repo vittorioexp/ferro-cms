@@ -73,7 +73,7 @@ fn issue_access_token(cfg: &AuthConfig, user: Uuid) -> Result<String> {
         .map_err(|e| FerroError::Internal(format!("token encoding failed: {e}")))
 }
 
-fn decode_access_token(cfg: &AuthConfig, token: &str) -> Result<Uuid> {
+pub fn decode_access_token(cfg: &AuthConfig, token: &str) -> Result<Uuid> {
     let mut validation = Validation::default();
     validation.set_issuer(&["ferro"]);
     validation.leeway = 5;
@@ -149,6 +149,19 @@ pub async fn accountability(pool: &PgPool, schema: &Schema, cfg: &AuthConfig, to
     if status != "active" {
         return Err(FerroError::Unauthorized("user is not active".into()));
     }
+    Ok(user_policies(schema, user, role))
+}
+
+/// What an active user may do (`None` when the user does not exist or is not active).
+pub async fn user_accountability(conn: &mut sqlx::PgConnection, schema: &Schema, user: Uuid) -> Result<Option<Accountability>> {
+    let row: Option<Option<Uuid>> = sqlx::query_scalar("SELECT role FROM ferro_users WHERE id = $1 AND status = 'active'")
+        .bind(user)
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok(row.map(|role| user_policies(schema, user, role)))
+}
+
+fn user_policies(schema: &Schema, user: Uuid, role: Option<Uuid>) -> Accountability {
     let mut policies = schema.public_policies();
     if let Some(r) = role.and_then(|r| schema.role(r)) {
         for pid in &r.policies {
@@ -159,7 +172,7 @@ pub async fn accountability(pool: &PgPool, schema: &Schema, cfg: &AuthConfig, to
             }
         }
     }
-    Ok(Accountability::from_policies(user, role, policies))
+    Accountability::from_policies(user, role, policies)
 }
 
 pub struct NewUser<'a> {

@@ -1,132 +1,69 @@
-# Data promotion between environments
+# Promoting content between environments
 
-Move **content and file binaries** from one Ferro environment to another with stable UUIDs, dependency closure, natural keys, conflict strategies, and optional prune.
+How to copy content and its files from one Ferro environment to another. The design
+(bundle format, dependency closure, import rules) is in [ARCHITECTURE.md](./ARCHITECTURE.md) §7.
 
-Related: [ENVIRONMENT.md](./ENVIRONMENT.md) (schema vs data), [ARCHITECTURE.md](./ARCHITECTURE.md) §7, [API.md](./API.md) (`/sync/*`).
+## Before you start
 
-## Prerequisites
+- An administrator token for both environments, declared in `ferro.toml` (§11) and
+  exported as `FERRO_<ENV>_TOKEN`.
+- The target schema must already have the collections and fields you export: run
+  `ferro schema apply --to <env>` first.
+- Collections with `sync.exclude: true` and users are never exported. `sync.natural_key`
+  (for example `[slug]`) lets the import reuse the target's item when ids differ.
 
-- **Administrator** access on source (export, read files) and target (import, write files).
-- Target **schema** compatible with exported collections (run `ferro schema apply` first if needed).
-- For **`safe`** strategy: prior successful imports record content hashes in `ferro_sync_state`.
-
-## What gets exported
-
-- Selected items plus **dependency closure** (M2O, O2M, M2M, M2A blocks, related rows).
-- **`ferro_files`** metadata and **folder** chain for referenced assets.
-- **Not exported**: users (system user fields stripped; foreign user refs nulled on import), collections with `sync.exclude: true`.
-
-Configure per field/collection in YAML:
-
-```yaml
-sync:
-  natural_key: [slug]   # remap ids when the same business key exists on target
-  exclude: false        # true = never in bundles
-```
-
-Relation modes: default shallow/deep, or `sync: deep | reference | skip` on fields ([ARCHITECTURE.md](./ARCHITECTURE.md) §7.3).
-
-## Bundle format (`ferro-bundle/1`)
-
-```
-bundle/
-  bundle.json     # items, collection defs, folders, file rows, "complete" parents
-  files/<uuid>    # one binary per referenced file id
-```
-
-`bundle.json` is returned by `POST /sync/export` inside `{ "data": … }`.
-
-## CLI
-
-Configure [ferro.toml](./ENVIRONMENT.md), set `FERRO_*_TOKEN` env vars.
-
-### Selection syntax
+## Selecting content
 
 ```bash
---select pages                                    # whole collection (with deps)
---select 'pages:id=0199…,0199…'                   # by id
---select 'pages:{"slug":{"_eq":"home"}}'          # by filter
---shallow                                         # no dependency closure
+--select pages                                # the whole collection
+--select 'pages:id=0199…,0199…'               # some items
+--select 'pages:{"slug":{"_eq":"home"}}'      # a filter
+--shallow                                     # without the related items
 ```
 
-### Commands
+`--select` can be repeated.
+
+## Commands
 
 ```bash
-# Preview (dry run on target; file binaries not required)
+# what would change (a dry run on the target)
 ferro data diff --from dev --to prod --select 'pages:{"slug":{"_eq":"home"}}' --report diff.html
 
-# One-step: export + transfer missing files + import
-ferro data push --from dev --to prod --select pages --strategy safe --prune --yes
+# export, copy the missing files, import
+ferro data push --from dev --to prod --select pages --strategy safe --prune
 
-# File-based (air-gapped or manual approval)
+# through a directory, when the environments cannot reach each other
 ferro data export --from dev --select pages --out ./bundle
+ferro data import --to prod --bundle ./bundle --dry-run --report import.html
 ferro data import --to prod --bundle ./bundle --yes
 ```
 
-### Import options
+Import options: `--strategy overwrite|safe|insert-only`, `--prune`, `--dry-run`,
+`--force`, `--ignore-missing-fields`, `--yes` (see §7.4). A protected environment asks
+for confirmation unless `--yes` is given. `--report file.html` and `--json` work on
+diff, import and push.
 
-| Flag | Effect |
-|------|--------|
-| `--strategy overwrite` | Default; update differing items |
-| `--strategy safe` | Skip/update unless target changed since last sync; else **conflict** |
-| `--strategy insert-only` | Never update existing rows |
-| `--prune` | Delete/detach owned children removed at source (complete parents only) |
-| `--dry-run` | Transaction rolled back; report = exact diff |
-| `--ignore-missing-fields` | Drop fields missing on target schema |
-| `--force` | Apply despite conflicts (overwrites conflicting items) |
-| `--yes` | Skip protected-environment prompt |
+## Files
 
-Protected targets (`protected = true` in `ferro.toml`) show a dry-run summary before apply unless `--yes`.
-
-## Asset (binary) transfer
-
-Metadata travels in the bundle; **bytes** are copied separately so large media is not embedded in JSON.
-
-**Push / admin flow:**
-
-1. `POST /sync/export` on **source** → bundle includes `files[]` with id + checksum.
-2. `POST /sync/missing-files` on **target** with `[{ id, checksum? }, …]` → list of ids still needed.
-3. For each id: `GET /sync/files/:id` on source → `PUT /sync/files/:id` on target (raw body).
-4. `POST /sync/import` on target — verifies each file blob exists in default storage before committing rows.
-
-Checksum match + blob present ⇒ skip re-upload. Export to disk writes `files/<uuid>`; import reads that directory before calling the API.
-
-E2e coverage: `tests/e2e/02-sync.mjs` (“transferred 1 file”, asset served on target).
-
-## HTTP API summary
-
-See [API.md](./API.md). All routes require **admin** except none are public.
-
-Reset sync history (for `safe` conflicts): `DELETE /sync/state` or with `{ "collection": "pages" }`.
+The bundle carries file metadata; the binaries travel apart. `push` asks the target
+which files it is missing (`POST /sync/missing-files`), copies only those
+(`GET /sync/files/:id` on the source, `PUT /sync/files/:id` on the target), then
+imports. `export` writes them to `files/<id>` and `import` uploads them first. The
+import fails if a referenced binary is not in the target's storage.
 
 ## Admin UI
 
-**Environment** (`#/schema`) → **Promote content from another server**:
+The Environment page has a "Promote content" card that uses the source URL and token of
+the schema alignment card: pick a collection, an optional filter and the options, run
+the preview, then promote. The source server must allow the admin origin in
+`FERRO_CORS_ORIGINS`.
 
-- Reuses **Source URL** and **Source token** from schema alignment.
-- Pick collection, optional filter JSON, strategy, dependency closure, prune.
-- **Preview (dry run)** then **Promote content + files** (confirmation dialog).
+## When something goes wrong
 
-## Reports
+- `missing in target (sync the schema)`: apply the schema to the target.
+- `binary of file … missing`: copy the files before importing (`push` does it).
+- `conflict` with `--strategy safe`: the item changed on the target since the last
+  sync. Fix it there, use `--force`, or clear the sync history with `DELETE /sync/state`
+  (optionally `{ "collection": "pages" }`).
 
-CLI: `--report file.html` on diff/import/push (field-level HTML). JSON via `--json`.
-
-## Troubleshooting
-
-| Symptom | Check |
-|---------|--------|
-| `missing in target (sync the schema)` | `ferro schema apply --to prod` |
-| `binary of file … missing` | Run file transfer before import (push does this automatically) |
-| `conflict` with `safe` | Resolve on target, use `--force`, or `DELETE /sync/state` |
-| `natural key` remap in report | Expected when same slug/name exists with different uuid |
-| CORS errors in admin | Source must allow admin origin for export/file GET |
-
-## Strategies reference
-
-| Strategy | When target row exists and content differs |
-|----------|---------------------------------------------|
-| `overwrite` | Update from bundle |
-| `safe` | Update only if hash matches last sync; else conflict |
-| `insert-only` | Leave target unchanged (`skip`) |
-
-Draft rows are environment-local; live content promotion follows published item rules in the engine ([ARCHITECTURE.md](./ARCHITECTURE.md) §8.6).
+Drafts are not exported; only live content is promoted.

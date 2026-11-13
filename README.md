@@ -31,30 +31,13 @@ data model, permissions and content between environments** (dev → test → pro
   fallback chain (REST and GraphQL), writes by language code, one tab per language in the Admin UI.
 - **GraphQL** with the same permissions (`POST /graphql`, SDL schema at `/graphql/schema`):
   typed relations, M2A blocks as unions (`... on block_text`), transactional mutations.
-- **Draft / publish** on collections with `meta.versioning.enabled`: live vs draft reads (`?version=`), programmatic publish and scheduled `publish_at` (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §8.6).
-- **Admin workspace**: item comments, in-app notifications, personal dashboard, insights, and saved list presets (§8.7).
-- **API platform**: REST aggregations (`group_by`, count/sum/avg/min/max), optional rate limiting and GET response cache, OpenAPI at `/server/openapi.json`, JavaScript SDK in `sdk/javascript` (§8.9).
-- **AI assistant** (optional): natural-language read/write in the admin when `FERRO_AI_*` is set ([docs/AI_ASSISTANT.md](docs/AI_ASSISTANT.md)).
-- **Multi-database migrations**: PostgreSQL for production API; SQLite/MySQL for `ferro migrate` only ([docs/DATABASES.md](docs/DATABASES.md)).
-- **Bracket query filters**: Directus-style `filter[field][_op]=value` on GET lists ([docs/FILTERS.md](docs/FILTERS.md)).
+- Drafts with scheduled publishing, item comments and notifications, saved list views.
+- Aggregations (`group_by`, count/sum/avg/min/max), Directus-style bracket filters
+  (`filter[status][_eq]=published`), optional rate limiting and response cache.
+- An optional chat assistant in the Admin UI, backed by an OpenAI-compatible API.
 
-## Documentation
-
-| Guide | Topic |
-|--------|--------|
-| **[docs/README.md](docs/README.md)** | **Documentation index (start here)** |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full design reference |
-| [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) | `ferro.toml`, schema vs data promotion |
-| [docs/DATA_SYNC.md](docs/DATA_SYNC.md) | Content + **file asset** sync (CLI, API, admin) |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Environment variables |
-| [docs/API.md](docs/API.md) | REST, `/sync/*`, `/assistant/*` |
-| [docs/FILTERS.md](docs/FILTERS.md) | Query filters |
-| [docs/AI_ASSISTANT.md](docs/AI_ASSISTANT.md) | Admin AI chat |
-| [docs/ADMIN.md](docs/ADMIN.md) | Admin UI routes and features |
-| [docs/CLI.md](docs/CLI.md) | Command-line interface |
-| [docs/DATABASES.md](docs/DATABASES.md) | Database backends |
-
-The complete design document is **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+The design is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); content promotion
+step by step in [docs/DATA_SYNC.md](docs/DATA_SYNC.md).
 
 ## Layout
 
@@ -69,7 +52,7 @@ crates/
 admin/           Admin UI (plain JavaScript, no build step), served on /admin
 examples/site    example project (ferro.toml + schema/)
 deploy/          docker-compose, Dockerfile, example Jenkinsfile
-docs/            guides (see docs/README.md) + ARCHITECTURE.md design reference
+docs/            ARCHITECTURE.md (design), DATA_SYNC.md (content promotion)
 ```
 
 ## Quick start
@@ -114,12 +97,6 @@ ferro data diff --from dev --to prod --select 'pages:{"slug":{"_eq":"home"}}' --
 ferro data push --from dev --to prod --select 'pages:{"slug":{"_eq":"home"}}' --strategy safe --prune
 ```
 
-See **[docs/DATA_SYNC.md](docs/DATA_SYNC.md)** for bundles, asset transfer, and the admin Environment page.
-
-## Documentation
-
-Full index: **[docs/README.md](docs/README.md)**.
-
 ## Tests
 
 ```bash
@@ -128,7 +105,7 @@ cargo test                # unit tests of the crates (no database needed)
 (cd admin && node --test test/*.test.mjs)   # Admin UI tests (Node >= 20)
 ```
 
-> Status: builds without warnings; 119 Rust tests + 58 Admin UI tests + 734 integration
+> Status: builds without warnings; 143 Rust tests + 60 Admin UI tests + 735 integration
 > checks + 79 browser checks, run end to end against PostgreSQL 16 with two environments,
 > an S3-compatible server and a real browser (see "Known limits" in
 > docs/ARCHITECTURE.md). The CI workflow is written but has not yet run on a real runner.

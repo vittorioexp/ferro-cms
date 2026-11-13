@@ -1,4 +1,4 @@
-// Dashboard home: configurable panels, insights, notifications preview.
+// Home dashboard (panels chosen per user) and the notification menu in the top bar.
 
 import { api } from '../api.js';
 import { add, button, fail, h, replace } from '../dom.js';
@@ -6,9 +6,7 @@ import * as S from '../schema.js';
 import { isAdmin, session } from '../session.js';
 import { shortId, truncate } from '../util.js';
 
-const go = (hash) => {
-  location.hash = hash;
-};
+const go = (hash) => (location.hash = hash);
 
 async function panelInsights(el) {
   const r = await api.get('/insights');
@@ -140,7 +138,7 @@ async function renderPanel(panel, root) {
 }
 
 export async function dashboardHome(root) {
-  const layout = (await api.get('/dashboard')).data?.layout || { panels: [{ type: 'insights' }, { type: 'collections' }] };
+  const { layout } = (await api.get('/dashboard')).data;
   const grid = h('div', { class: 'dashboard-grid' });
   add(root, h('div', { class: 'page-head' }, h('h1', {}, 'Dashboard'), h('span', { class: 'muted' }, session.me?.email || '')));
   add(root, grid);
@@ -149,10 +147,21 @@ export async function dashboardHome(root) {
   }
 }
 
-/** Bell + dropdown in the top bar. */
+let poll = null;
+let openMenu = null;
+let closeOnClick = false;
+
+// Called again after each sign-in: replaces the previous menu and its timer.
 export function mountNotificationBell(topbar) {
+  topbar.querySelector('.notif-wrap')?.remove();
+  clearInterval(poll);
+  if (!closeOnClick) {
+    document.addEventListener('click', () => openMenu && (openMenu.hidden = true));
+    closeOnClick = true;
+  }
   const badge = h('span', { class: 'notif-badge', hidden: true }, '0');
   const menu = h('div', { class: 'notif-menu', hidden: true, onClick: (e) => e.stopPropagation() });
+  openMenu = menu;
   const btn = h(
     'button',
     {
@@ -169,7 +178,7 @@ export function mountNotificationBell(topbar) {
         }
       },
     },
-    '🔔',
+    'Inbox',
     badge,
   );
   const wrap = h('div', { class: 'notif-wrap' }, btn, menu);
@@ -203,9 +212,7 @@ export function mountNotificationBell(topbar) {
     );
   }
 
-  refresh().catch(() => {});
-  setInterval(() => refresh().catch(() => {}), 60_000);
-  document.addEventListener('click', () => {
-    menu.hidden = true;
-  });
+  const update = () => refresh().catch((err) => console.warn('notifications:', err.message));
+  update();
+  poll = setInterval(update, 60_000);
 }

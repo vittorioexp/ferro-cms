@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::database::DatabaseKind;
-
 pub const SNAPSHOT_VERSION: u32 = 1;
 /// Prefix reserved for system tables. User collections cannot use it.
 pub const SYSTEM_PREFIX: &str = "ferro_";
@@ -387,44 +385,11 @@ impl Field {
         })
     }
 
+    /// Type used in `CAST($n AS ...)` when binding values.
     pub fn cast_type(&self) -> String {
-        self.cast_type_for(DatabaseKind::Postgres)
-    }
-
-    pub fn cast_type_for(&self, kind: DatabaseKind) -> String {
-        if kind == DatabaseKind::Postgres {
-            return match self.ty {
-                FieldType::String | FieldType::Text => "text".into(),
-                _ => self.pg_type().unwrap_or_else(|| "text".into()),
-            };
-        }
         match self.ty {
-            FieldType::String | FieldType::Text | FieldType::Uuid | FieldType::M2o | FieldType::File | FieldType::M2aItem => {
-                "text".into()
-            }
-            FieldType::Integer => "integer".into(),
-            FieldType::BigInteger => "integer".into(),
-            FieldType::Float | FieldType::Decimal => "real".into(),
-            FieldType::Boolean => "integer".into(),
-            FieldType::Json => "text".into(),
-            FieldType::Date | FieldType::Datetime | FieldType::Time => "text".into(),
-            FieldType::O2m | FieldType::M2m | FieldType::M2a | FieldType::Translations => "text".into(),
-        }
-    }
-
-    pub fn sql_type(&self, kind: DatabaseKind) -> Option<String> {
-        match kind {
-            DatabaseKind::Postgres => self.pg_type(),
-            DatabaseKind::Sqlite | DatabaseKind::Mysql => {
-                self.pg_type().map(|t| {
-                    t.replace("jsonb", "TEXT")
-                        .replace("timestamptz", "TEXT")
-                        .replace("uuid", "TEXT")
-                        .replace("double precision", "REAL")
-                        .replace("bigint", "INTEGER")
-                        .replace("boolean", "INTEGER")
-                })
-            }
+            FieldType::String | FieldType::Text => "text".into(),
+            _ => self.pg_type().unwrap_or_else(|| "text".into()),
         }
     }
 }

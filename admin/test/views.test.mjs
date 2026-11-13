@@ -58,6 +58,9 @@ function respond(method, url) {
   if (p === '/presets') return ok([]);
   if (p === '/dashboard') return ok({ layout: { panels: [{ type: 'collections' }] } });
   if (p.endsWith('/comments')) return ok([]);
+  if (p === '/notifications') return ok([], { unread_count: 0 });
+  if (p === '/assistant/config') return ok({ enabled: true, model: 'test-model' });
+  if (p === '/assistant/chat' && method === 'POST') return ok({ message: { role: 'assistant', content: 'There is one page.' }, steps: ['list_items'] });
   if (p === '/flows' && method === 'GET') return ok([FLOW]);
   if (p === '/flow-actions') return ok([{ id: 'f-manual', name: 'Reprocess' }]);
   if (p === `/flows/${FLOW.id}` && method === 'PUT') return { data: FLOW, meta: { applied: !u.searchParams.get('dry_run'), changes: ['~ flow Notify'], sql: [] } };
@@ -86,6 +89,8 @@ const { usersView } = await import('../js/views/users.js');
 const { graphqlView, sampleQuery } = await import('../js/views/graphql.js');
 const { flowsView } = await import('../js/views/flows.js');
 const { schemaView, activityView } = await import('../js/views/system.js');
+const { dashboardHome } = await import('../js/views/dashboard.js');
+const { assistantView } = await import('../js/views/assistant.js');
 
 S.setCollections(COLLECTIONS);
 session.info = { environment: 'dev', schema_hash: 'abcdef012345', collections: COLLECTIONS.length };
@@ -257,4 +262,25 @@ test('item editor: another user changing the item shows a banner, our own save d
   assert.equal(banner.hidden, true, 'the echo of our own save is ignored');
   runLeave();
   assert.equal(sock.readyState, 3, 'leaving the view closes the socket when nothing else is subscribed');
+});
+
+test('dashboard renders the panels of the saved layout', async () => {
+  const root = await render(dashboardHome);
+  assert.match(root.text, /Dashboard/);
+  assert.match(root.text, /Collections/);
+});
+
+test('assistant sends the conversation with the collection being viewed', async () => {
+  calls.length = 0;
+  sessionStorage.setItem('ferro_content_collection', 'pages');
+  const root = await render(assistantView);
+  assert.match(root.text, /test-model/);
+  findAll(root, (n) => n.tagName === 'TEXTAREA')[0].value = 'how many pages?';
+  await fire(buttonByText(root, 'Send'), 'click');
+  await wait(20);
+  const sent = JSON.parse(calls.find((c) => c.url === '/assistant/chat').body);
+  assert.deepEqual(sent.messages, [{ role: 'user', content: 'how many pages?' }]);
+  assert.equal(sent.context.collection, 'pages');
+  assert.ok(!sent.allow_writes, 'writes stay off unless the box is ticked');
+  assert.match(root.text, /There is one page\./);
 });

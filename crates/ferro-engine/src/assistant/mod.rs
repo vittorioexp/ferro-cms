@@ -3,15 +3,11 @@
 mod llm;
 mod tools;
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::PgPool;
 
 use crate::items::Ctx;
 use crate::schema::Schema;
-use crate::{FerroError, Result};
 
 pub use llm::AssistantLlmConfig;
 
@@ -20,11 +16,6 @@ pub struct AssistantConfig {
     pub enabled: bool,
     pub llm: AssistantLlmConfig,
     pub max_rounds: u32,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ChatContext {
-    pub collection: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -44,27 +35,13 @@ pub struct ChatReply {
 #[derive(Debug, Clone)]
 pub struct ChatOptions {
     pub allow_writes: bool,
-    pub context: ChatContext,
+    /// Collection open in the admin, if any.
+    pub collection: Option<String>,
 }
 
-pub async fn chat(
-    pool: &PgPool,
-    schema: Arc<Schema>,
-    cfg: &AssistantConfig,
-    ctx: Ctx,
-    messages: Vec<ChatTurn>,
-    opts: ChatOptions,
-) -> Result<ChatReply> {
-    if !cfg.enabled {
-        return Err(FerroError::invalid("AI assistant is not enabled on this server"));
-    }
-    if !cfg.llm.configured() {
-        return Err(FerroError::invalid("AI assistant is missing FERRO_AI_API_KEY or FERRO_AI_MODEL"));
-    }
-    llm::run(pool, schema, cfg, ctx, messages, opts).await
-}
+pub use llm::run as chat;
 
-pub(crate) fn system_prompt(schema: &Schema, ctx: &Ctx, chat_ctx: &ChatContext, allow_writes: bool) -> String {
+pub(crate) fn system_prompt(schema: &Schema, ctx: &Ctx, collection: Option<&str>, allow_writes: bool) -> String {
     let mut lines = vec![
         "You are the Ferro CMS assistant. Help users find and manage their content.".into(),
         "Use the provided tools to read or change data; never invent item ids or field names.".into(),
@@ -74,7 +51,7 @@ pub(crate) fn system_prompt(schema: &Schema, ctx: &Ctx, chat_ctx: &ChatContext, 
     if !allow_writes {
         lines.push("The user has NOT enabled writes: do not call create_item, update_item, or delete_item.".into());
     }
-    if let Some(c) = &chat_ctx.collection {
+    if let Some(c) = collection {
         lines.push(format!("The user is viewing collection `{c}` — prefer that collection when relevant."));
     }
     let names = tools::readable_collection_names(schema, &ctx.acc);

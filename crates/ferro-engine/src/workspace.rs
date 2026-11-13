@@ -1,4 +1,4 @@
-//! Admin workspace: item comments, in-app notifications, saved list presets, dashboards, insights.
+//! Admin workspace: comments, notifications, saved views, dashboards.
 
 use std::collections::HashSet;
 
@@ -6,13 +6,12 @@ use chrono::{DateTime, Utc};
 use ferro_core::Action;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::Connection;
+use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
+use crate::ddl::q;
 use crate::items::{self, Ctx};
 use crate::permissions;
-use crate::ddl::q;
-use sqlx::PgConnection;
 use crate::{FerroError, Result};
 
 pub fn require_app_user(acc: &permissions::Accountability) -> Result<Uuid> {
@@ -122,7 +121,7 @@ pub async fn create_comment(
     .execute(&mut *tx)
     .await?;
 
-    notify_for_comment(&mut tx, author, collection, &item.to_string(), body.parent, text).await?;
+    notify_for_comment(ctx, &mut tx, author, collection, item, body.parent, text).await?;
     tx.commit().await?;
 
     Ok(json!({
@@ -137,34 +136,53 @@ pub async fn create_comment(
     }))
 }
 
+const MAX_MENTIONS: usize = 20;
+
+/// Can `user` (active, with admin app access) read this item? Notifications quote the comment.
+async fn may_be_notified(ctx: &Ctx, conn: &mut PgConnection, user: Uuid, collection: &str, item: Uuid) -> Result<bool> {
+    let Some(acc) = crate::auth::user_accountability(conn, &ctx.schema, user).await? else {
+        return Ok(false);
+    };
+    if !acc.app {
+        return Ok(false);
+    }
+    let Ok(perm) = permissions::access(&acc, collection, Action::Read) else {
+        return Ok(false);
+    };
+    let info = ctx.schema.collection(collection)?;
+    let rctx = Ctx { schema: ctx.schema.clone(), acc, origin: ctx.origin };
+    match items::ensure_permitted(&rctx, conn, &info, &perm, &[item]).await {
+        Ok(()) => Ok(true),
+        Err(FerroError::Forbidden(_)) | Err(FerroError::NotFound(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 async fn notify_for_comment(
+    ctx: &Ctx,
     conn: &mut PgConnection,
     author: Uuid,
     collection: &str,
-    item: &str,
+    item: Uuid,
     parent: Option<Uuid>,
     text: &str,
 ) -> Result<()> {
-    let mut recipients = HashSet::new();
+    let mut candidates = HashSet::new();
     if let Some(parent) = parent {
         let parent_author: Option<Uuid> = sqlx::query_scalar("SELECT \"user\" FROM ferro_comments WHERE id = $1")
             .bind(parent)
             .fetch_one(&mut *conn)
             .await?;
-        if let Some(uid) = parent_author {
-            if uid != author {
-                recipients.insert(uid);
-            }
-        }
+        candidates.extend(parent_author);
     }
-    for uid in mention_user_ids(text) {
-        if uid != author {
-            recipients.insert(uid);
-        }
-    }
+    candidates.extend(mention_user_ids(text).into_iter().take(MAX_MENTIONS));
+    candidates.remove(&author);
     let subject = "New comment";
     let message = truncate(text, 240);
-    for recipient in recipients {
+    for recipient in candidates {
+        if !may_be_notified(ctx, conn, recipient, collection, item).await? {
+            continue;
+        }
         insert_notification(
             conn,
             recipient,
@@ -173,7 +191,7 @@ async fn notify_for_comment(
             subject,
             &message,
             Some(collection),
-            Some(item),
+            Some(&item.to_string()),
         )
         .await?;
     }
@@ -181,21 +199,10 @@ async fn notify_for_comment(
 }
 
 fn mention_user_ids(text: &str) -> Vec<Uuid> {
-    let mut out = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'@' && i + 37 <= bytes.len() {
-            let slice = &text[i + 1..i + 37];
-            if slice.chars().count() == 36 {
-                if let Ok(uid) = Uuid::parse_str(slice) {
-                    out.push(uid);
-                }
-            }
-        }
-        i += 1;
-    }
-    out
+    text.match_indices('@')
+        .filter_map(|(i, _)| text.get(i + 1..i + 37))
+        .filter_map(|s| Uuid::parse_str(s).ok())
+        .collect()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -657,5 +664,11 @@ mod tests {
         let ids = mention_user_ids(&format!("Hi @{uid} and @not-a-uuid"));
         assert_eq!(ids, vec![uid]);
         assert!(mention_user_ids(&format!("tail @{uid}")).contains(&uid));
+    }
+
+    #[test]
+    fn mention_parsing_survives_multibyte_text() {
+        assert!(mention_user_ids(&format!("@{}", "é".repeat(40))).is_empty());
+        assert!(mention_user_ids("@ciao 😀😀😀😀😀😀😀😀😀😀😀😀").is_empty());
     }
 }

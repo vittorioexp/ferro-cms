@@ -706,6 +706,9 @@ pub async fn delete_many(ctx: &Ctx, conn: &mut PgConnection, collection: &str, i
     let p = sql.bind(uuid_array(&ids));
     let text = format!("DELETE FROM {} WHERE \"id\" = ANY(CAST({p} AS uuid[]))", q(&info.name));
     let n = execute(&mut *conn, &text, sql.params).await?;
+    if info.def.versioning_enabled() {
+        crate::versioning::delete_drafts(&mut *conn, collection, &ids).await?;
+    }
     for id in &ids {
         let data = last.get(id);
         activity::record(&mut *conn, &ctx.acc, "delete", collection, &id.to_string(), ctx.origin, data, None).await?;

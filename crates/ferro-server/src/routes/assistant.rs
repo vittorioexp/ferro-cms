@@ -1,10 +1,7 @@
-//! AI assistant HTTP API.
-
 use axum::http::StatusCode;
 use axum::extract::State;
 use axum::Json;
-use ferro_engine::assistant::{self, AssistantConfig, ChatContext, ChatOptions, ChatTurn};
-use ferro_engine::assistant::AssistantLlmConfig;
+use ferro_engine::assistant::{self, AssistantConfig, AssistantLlmConfig, ChatOptions, ChatTurn};
 use ferro_engine::Accountability;
 use ferro_engine::items::Ctx;
 use serde::Deserialize;
@@ -107,20 +104,17 @@ pub async fn chat(State(st): State<AppState>, Acc(acc): Acc, Json(body): Json<Ch
         return Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "UNAVAILABLE",
-            "AI assistant is not configured (see docs/AI_ASSISTANT.md)",
+            "AI assistant is not configured (FERRO_AI_ENABLED, FERRO_AI_API_KEY)",
         ));
     }
     let ctx = Ctx::new(st.schema.get(), acc);
     let opts = ChatOptions {
         allow_writes: body.allow_writes,
-        context: ChatContext {
-            collection: body
-                .context
-                .and_then(|c| c.collection)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .filter(|name| st.schema.get().collection(name).is_ok()),
-        },
+        collection: body
+            .context
+            .and_then(|c| c.collection)
+            .map(|s| s.trim().to_string())
+            .filter(|name| st.schema.get().collection(name).is_ok()),
     };
     let reply = assistant::chat(&st.pool, st.schema.get(), &cfg, ctx, body.messages, opts).await?;
     Ok(Json(json!({ "data": reply })))

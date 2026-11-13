@@ -47,6 +47,8 @@ export class FakeEl {
   setAttribute(k, v) {
     this.attrs[k] = v;
   }
+  focus() {}
+
   addEventListener(type, fn) {
     (this.handlers[type] ||= []).push(fn);
   }
@@ -63,6 +65,8 @@ export function install() {
     createTextNode: (t) => new FakeText(t),
     getElementById: () => null,
   };
+  const store = new Map();
+  globalThis.sessionStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)) };
   return body;
 }
 

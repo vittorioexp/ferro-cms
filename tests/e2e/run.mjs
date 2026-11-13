@@ -17,7 +17,8 @@ const suites = readdirSync(dir)
   .sort();
 
 const a = new Env('a', 18055, 'ferro_e2e_a', { FERRO_LOGIN_LOCKOUT_SECS: '3', FERRO_FLOW_ENV_PUBLISH_HOOK_TOKEN: 'tok123', FERRO_FLOW_ALLOW_PRIVATE: 'true', FERRO_WEBHOOK_SECRET: 's3cret', FERRO_EXTENSIONS_DIR: join(ROOT, 'examples/site/extensions'), FERRO_ADMIN_DIR: join(ROOT, 'admin') });
-const b = new Env('b', 18056, 'ferro_e2e_b', {});
+// b runs with the response cache and the rate limiter on: every suite that uses it also checks they are transparent
+const b = new Env('b', 18056, 'ferro_e2e_b', { FERRO_HTTP_CACHE_TTL: '60', FERRO_RATE_LIMIT_RPM: '100000' });
 
 let ok = false;
 try {

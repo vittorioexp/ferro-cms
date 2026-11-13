@@ -80,9 +80,8 @@ pub async fn run(ctx: &Ctx, conn: &mut PgConnection, collection: &str, req: Aggr
     };
 
     let limit = req.limit.unwrap_or(DEFAULT_GROUP_LIMIT).clamp(1, 2000);
-    let lim = sql.bind(Some(limit.to_string()));
     let text = format!(
-        "SELECT COALESCE(jsonb_agg(to_jsonb(s)), '[]'::jsonb) FROM (SELECT {} FROM {} AS t0 WHERE {where_sql}{group_sql} ORDER BY 1 LIMIT {lim}) s",
+        "SELECT COALESCE(jsonb_agg(to_jsonb(s)), '[]'::jsonb) FROM (SELECT {} FROM {} AS t0 WHERE {where_sql}{group_sql} ORDER BY 1 LIMIT {limit}) s",
         select_parts.join(", "),
         q(&info.name),
     );

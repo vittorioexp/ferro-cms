@@ -179,6 +179,14 @@ pub fn eval_op(op: &str, value: &Value, operand: &Value) -> bool {
     }
 }
 
+const MAX_BRACKET_INDEX: usize = 1000;
+const MAX_BRACKET_DEPTH: usize = 16;
+
+/// `filter[x][_in][99999999]=1` would allocate a huge array.
+fn bracket_path_allowed(path: &[String]) -> bool {
+    path.len() <= MAX_BRACKET_DEPTH && !path.iter().any(|p| p.parse::<usize>().is_ok_and(|i| i >= MAX_BRACKET_INDEX))
+}
+
 /// Parse Directus-style bracket query params (`filter[status][_eq]=published`) into filter JSON.
 pub fn parse_bracket_query(query: &str) -> Option<Value> {
     let mut root = Value::Object(Map::new());
@@ -187,6 +195,9 @@ pub fn parse_bracket_query(query: &str) -> Option<Value> {
         let Some(path) = filter_key_path(&key) else {
             continue;
         };
+        if !bracket_path_allowed(&path) {
+            continue;
+        }
         any = true;
         insert_filter_path(&mut root, &path, parse_query_scalar(&value));
     }
@@ -201,6 +212,14 @@ pub fn merge_query_filters(json_filter: Option<&str>, query: &str) -> Result<Opt
         ),
         None => None,
     };
+    // dropping a condition would silently return more rows than asked for: refuse instead
+    for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
+        if filter_key_path(&key).is_some_and(|p| !bracket_path_allowed(&p)) {
+            return Err(format!(
+                "`{key}`: bracket filters allow at most {MAX_BRACKET_DEPTH} levels and list indexes below {MAX_BRACKET_INDEX}"
+            ));
+        }
+    }
     let bracket = parse_bracket_query(query);
     Ok(and_all(vec![json, bracket]))
 }
@@ -377,6 +396,13 @@ mod tests {
             parse_bracket_query(q),
             Some(json!({ "blocks": { "_some": { "collection": { "_eq": "block_text" } } } }))
         );
+    }
+
+    #[test]
+    fn bracket_query_rejects_huge_indexes() {
+        assert_eq!(parse_bracket_query("filter[id][_in][99999999]=1"), None);
+        assert!(merge_query_filters(None, "filter[id][_in][99999999]=1&filter[status][_eq]=ok").is_err());
+        assert!(merge_query_filters(None, "filter[id][_in][999]=1").is_ok());
     }
 
     #[test]

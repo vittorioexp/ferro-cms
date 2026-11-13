@@ -1,11 +1,60 @@
 // Environment (schema hash, history, compare / promote) and activity log.
 
-import { api, download } from '../api.js';
+import { api, ApiError, baseUrl, currentToken, download } from '../api.js';
 import { add, applyWithPreview, button, confirmDialog, fail, h, inputEl, labeled, replace, selectEl, toast } from '../dom.js';
 import * as S from '../schema.js';
 import { reloadCollections, session } from '../session.js';
-import { buildSelection, exportFromRemote, formatImportReport, importBundle, transferBundleFiles } from '../sync.js';
 import { shortId, truncate } from '../util.js';
+
+// ---------------------------------------------------------------------------
+// content promotion from another server (same steps as `ferro data push`)
+// ---------------------------------------------------------------------------
+
+async function remoteFetch(url, token, path, init = {}) {
+  const res = await fetch(`${url}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...init.headers } });
+  if (!res.ok) {
+    const json = await res.json().catch(() => null);
+    throw new ApiError(json?.errors?.[0]?.message || `${url} answered HTTP ${res.status}`, res.status);
+  }
+  return res;
+}
+
+async function exportFromRemote(url, token, selections) {
+  const res = await remoteFetch(url, token, '/sync/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ selections }),
+  });
+  return (await res.json()).data;
+}
+
+// Copies the binaries this server lacks; returns how many.
+async function transferBundleFiles(url, token, bundle) {
+  const files = bundle.files || [];
+  if (!files.length) return 0;
+  const missing = (await api.post('/sync/missing-files', files.map((f) => ({ id: f.id, checksum: f.checksum ?? null })))).data || [];
+  for (const id of missing) {
+    const body = await (await remoteFetch(url, token, `/sync/files/${id}`)).arrayBuffer();
+    const up = await fetch(`${baseUrl()}/sync/files/${id}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${currentToken()}`, 'Content-Type': 'application/octet-stream' },
+      body,
+    });
+    if (!up.ok) throw new ApiError(`Upload of file ${id} failed (HTTP ${up.status})`, up.status);
+  }
+  return missing.length;
+}
+
+function formatImportReport(report) {
+  const mode = report.dry_run ? 'DRY RUN' : report.committed ? 'APPLIED' : report.ok ? 'OK' : 'FAILED';
+  const lines = [`${report.source || 'bundle'} → ${report.target || 'this environment'}  (${mode})`];
+  for (const [c, s] of Object.entries(report.summary || {})) {
+    lines.push(`  ${c}: +${s.create} ~${s.update} -${s.delete} conflict ${s.conflict} = ${s.unchanged}`);
+  }
+  for (const w of report.warnings || []) lines.push(`  warn: ${w}`);
+  for (const e of report.errors || []) lines.push(`  error: ${e}`);
+  return lines.join('\n');
+}
 
 /** Plan + apply an arbitrary snapshot to this environment, with preview. */
 async function promote(title, snapshot) {
@@ -28,24 +77,20 @@ export async function schemaView(root) {
   async function runDataPromotion(dryRun) {
     if (!remote.url || !remote.token) throw new Error('Source URL and administrator token are required');
     if (!data.collection) throw new Error('Choose a collection to export');
-    let selection;
-    try {
-      selection = buildSelection(data.collection, data.filter, data.withDeps);
-    } catch (e) {
-      throw new Error(`Invalid filter JSON: ${e.message}`);
+    const selection = { collection: data.collection, with_dependencies: data.withDeps };
+    if (data.filter.trim()) {
+      try {
+        selection.filter = JSON.parse(data.filter);
+      } catch (e) {
+        throw new Error(`Invalid filter JSON: ${e.message}`);
+      }
     }
     dataResult.textContent = dryRun ? 'Exporting from source (preview)…' : 'Exporting and promoting…';
     const bundle = await exportFromRemote(remote.url, remote.token, [selection]);
-    const itemCount = Object.values(bundle.items || {}).reduce((n, arr) => n + (Array.isArray(arr) ? arr.length : 0), 0);
-    let transferred = 0;
-    if (!dryRun) transferred = await transferBundleFiles(remote.url, remote.token, bundle);
-    const report = await importBundle(bundle, {
-      strategy: data.strategy,
-      prune: data.prune,
-      dry_run: dryRun,
-      ignore_missing_fields: false,
-      force: false,
-    });
+    const itemCount = Object.values(bundle.items || {}).reduce((n, list) => n + list.length, 0);
+    const transferred = dryRun ? 0 : await transferBundleFiles(remote.url, remote.token, bundle);
+    const options = { strategy: data.strategy, prune: data.prune, dry_run: dryRun };
+    const report = (await api.post('/sync/import', { bundle, options })).data;
     const head = dryRun
       ? `Preview: ${itemCount} items, ${bundle.files?.length ?? 0} files in bundle.\n`
       : `Transferred ${transferred} file(s).\n`;

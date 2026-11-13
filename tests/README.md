@@ -1,7 +1,5 @@
 # Tests
 
-Design and feature docs: **[docs/README.md](../docs/README.md)**.
-
 | Layer | Where | Run | Needs |
 |---|---|---|---|
 | Rust unit tests | `crates/*/src` | `cargo test --workspace` | Rust |
@@ -14,7 +12,8 @@ Design and feature docs: **[docs/README.md](../docs/README.md)**.
 
 `run.mjs` creates the databases `ferro_e2e_a` and `ferro_e2e_b` (dropping them first), starts two servers on
 ports 18055/18056 with the example project applied, runs the suites in order, stops everything and exits non-zero
-on any failure. Server logs: `target/e2e/*.log`.
+on any failure (735 checks on 2026-11-13). Environment b runs with the response cache and the rate limiter on, so
+every suite that uses it also checks that they change nothing. Server logs: `target/e2e/*.log`.
 
 | Suite | Covers |
 |---|---|
@@ -26,14 +25,14 @@ on any failure. Server logs: `target/e2e/*.log`.
 | `05-security` | SQL injection, forged JWTs, mass assignment, row/field permissions, filter/sort/search/count oracles, path traversal, malformed input, brute force |
 | `06-realtime` | subscriptions, filters, per-client permissions, validation, limits, suspended users, two instances, schema propagation |
 | `07-storage` | S3-compatible bucket next to the disk: upload/replace/delete, 12 MB file, signed redirects (tampered signature, other key), permissions before signing, orphan cleanup, multi-location, `ferro storage list/check/migrate`, startup errors, promotion bucket → disk and back. Skipped unless `E2E_S3_ENDPOINT` is set |
+| `08-images` | resize, every fit mode, cover position, crop, JPEG / PNG / WebP output, quality, transparency, validation (17 invalid requests), non-images and corrupt files, a decompression bomb, permissions, `ETag` / `304`, a burst of 24 concurrent transformations; pixels are checked by decoding the real output |
 | `09-auth-email` | two-factor authentication (RFC 6238 codes, replay, recovery codes spent once under concurrency, secrets encrypted and never exposed, throttling, admin / CLI reset), password reset by email (no account enumeration, Host-header poisoning, single use, expiry, sessions ended, throttle), invitations (renewal, fallback link, token kinds not interchangeable) against a fake SMTP server |
 | `10-auth-sso` | single sign-on against a mock OpenID provider: PKCE, state cookie, open redirects, first sign-in rules (registration, domains, verified email, pre-created / invited / local / bound accounts), forged and replayed ID tokens (`none`, HMAC key confusion, wrong key / aud / iss / nonce / azp / expiry), key rotation, userinfo, OAuth 2.0 without an ID token, provider outages |
 | `11-auth-ldap` | directory login against a real LDAP server (ldapjs): search-then-bind, filter injection, empty-password pitfall, ambiguous entries, account binding by entryUUID, second factor, lockout, outages, `ldaps://` with and without certificate verification |
 | `12-translations` | guided set-up (dry run, validation, seeding), the composite UNIQUE constraint and 8 concurrent creates, writing by language code (partial update, null, unknown language, rollback, reserved keys, operations / array forms), reading with `lang` (fallback chain, per-field, defaults on the item, stable shape, lists, GraphQL), permissions on the translations collection, language lifecycle (RESTRICT / CASCADE), promotion with merge per language |
-| `13-versioning` | draft vs live reads/writes, publish (archives prior live), version restore into draft, discard, `version=draft` rejected without `meta.versioning`, schedule via `publish_at` + force publish |
-| `14-workspace` | item comments, notifications list, saved presets, dashboard layout, insights |
-| `15-api-platform` | OpenAPI document, REST aggregate (group_by + count), ETag when HTTP cache enabled |
-| `08-images` | resize, every fit mode, cover position, crop, JPEG / PNG / WebP output, quality, transparency, validation (17 invalid requests), non-images and corrupt files, a decompression bomb, permissions, `ETag` / `304`, a burst of 24 concurrent transformations; pixels are checked by decoding the real output |
+| `13-versioning` | draft and live reads and writes, `fields` on draft reads, publish (archives the live item, keeps live edits made after the draft, JSON fields replaced whole), restore into the draft, discard, `version=draft` refused without versioning, scheduling and forced publish, drafts gone with their item |
+| `14-workspace` | comments, mentions (only users who can read the item are notified; unknown ids and multibyte text accepted), notifications, saved presets, dashboard, insights |
+| `15-api-platform` | aggregations, bracket-filter limits, an invalid bearer header on login and the Admin UI, response cache on b (fresh after writes, `304`, responses above 512 KB returned whole) |
 
 Storage suite: needs an S3-compatible server with a bucket, e.g. SeaweedFS (`weed server -s3 -s3.port=19000 -s3.config=s3.json`,
 bucket created with `curl -X POST http://127.0.0.1:8888/buckets/ferro-test/`) and then

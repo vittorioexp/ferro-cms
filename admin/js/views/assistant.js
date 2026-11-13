@@ -1,4 +1,4 @@
-// AI assistant: natural-language queries and optional writes against CMS data.
+// Chat with the assistant; writes only when the box is ticked.
 
 import { api } from '../api.js';
 import { add, button, fail, h } from '../dom.js';
@@ -18,7 +18,7 @@ export async function assistantView(root) {
     add(
       root,
       h('div', { class: 'page-head' }, h('h1', {}, 'Assistant')),
-      h('div', { class: 'card' }, h('p', {}, 'The AI assistant is not enabled on this server.'), h('p', { class: 'muted small' }, 'Set FERRO_AI_ENABLED=true and FERRO_AI_API_KEY on the API. See docs/AI_ASSISTANT.md.')),
+      h('div', { class: 'card' }, h('p', {}, 'The AI assistant is not enabled on this server.'), h('p', { class: 'muted small' }, 'Set FERRO_AI_ENABLED=true and FERRO_AI_API_KEY on the API.')),
     );
     return;
   }
@@ -49,12 +49,7 @@ export async function assistantView(root) {
     renderLog();
     sendBtn.disabled = true;
     try {
-      let ctxCol = null;
-      try {
-        ctxCol = sessionStorage.getItem('ferro_content_collection');
-      } catch {
-        /* ignore */
-      }
+      const ctxCol = sessionStorage.getItem('ferro_content_collection');
       const payload = {
         messages: messages
           .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.error)

@@ -10,6 +10,7 @@ use ferro_engine::files::{self as engine_files, BlobRef, Upload};
 use ferro_core::hash::sha256_hex;
 use ferro_engine::images::{self, RawParams, TransformParams};
 use ferro_engine::items;
+use ferro_engine::versioning::ReadVersion;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -51,7 +52,7 @@ pub async fn upload(State(st): State<AppState>, Acc(acc): Acc, Query(q): Query<U
             st.storages.purge(&stale).await;
             let mut out = vec![];
             for id in &ids {
-                out.push(read_back(&st, &ctx, FILES, *id, None, None).await?);
+                out.push(read_back(&st, &ctx, FILES, *id, None, ReadVersion::Published).await?);
             }
             let data = if out.len() == 1 { out.remove(0) } else { Value::Array(out) };
             Ok(Json(json!({ "data": data })))
@@ -133,7 +134,7 @@ pub async fn update(State(st): State<AppState>, Acc(acc): Acc, Path(id): Path<Uu
     let mut tx = st.pool.begin().await?;
     items::update_one(&ctx, &mut tx, FILES, id, Value::Object(patch)).await?;
     tx.commit().await?;
-    Ok(Json(json!({ "data": read_back(&st, &ctx, FILES, id, None, None).await? })))
+    Ok(Json(json!({ "data": read_back(&st, &ctx, FILES, id, None, ReadVersion::Published).await? })))
 }
 
 pub async fn remove(State(st): State<AppState>, Acc(acc): Acc, Path(id): Path<Uuid>) -> ApiResult<StatusCode> {
@@ -307,5 +308,5 @@ pub async fn create_folder(State(st): State<AppState>, Acc(acc): Acc, Json(body)
     let mut tx = st.pool.begin().await?;
     let id = items::create_one(&ctx, &mut tx, FOLDERS, body).await?;
     tx.commit().await?;
-    Ok(Json(json!({ "data": read_back(&st, &ctx, FOLDERS, id, None, None).await? })))
+    Ok(Json(json!({ "data": read_back(&st, &ctx, FOLDERS, id, None, ReadVersion::Published).await? })))
 }

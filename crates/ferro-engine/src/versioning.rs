@@ -1,5 +1,4 @@
-//! Draft content, published snapshots and scheduled publishing for collections with
-//! `meta.versioning.enabled`.
+//! Drafts, published snapshots and scheduled publishing (`meta.versioning.enabled`).
 
 use std::sync::Arc;
 
@@ -13,7 +12,6 @@ use uuid::Uuid;
 use crate::activity;
 use crate::items::{self, Ctx};
 use crate::permissions::{self, Access, Accountability};
-use crate::realtime;
 use crate::schema::Schema;
 use crate::{FerroError, Result};
 
@@ -56,44 +54,36 @@ struct DraftRow {
     publish_at: Option<DateTime<Utc>>,
 }
 
+/// Locks the row until the end of the transaction (concurrent saves and publishes are serialized).
 async fn load_draft(conn: &mut PgConnection, collection: &str, item: Uuid) -> Result<Option<DraftRow>> {
     let row: Option<(Value, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT data, publish_at FROM ferro_item_drafts WHERE collection = $1 AND item = $2",
+        "SELECT data, publish_at FROM ferro_item_drafts WHERE collection = $1 AND item = $2 FOR UPDATE",
     )
     .bind(collection)
-    .bind(item)
+    .bind(item.to_string())
     .fetch_optional(&mut *conn)
     .await?;
     Ok(row.map(|(data, publish_at)| DraftRow { data, publish_at }))
 }
 
-fn schedule_from_payload(info: &crate::schema::CollectionInfo, payload: &Value) -> Option<DateTime<Utc>> {
+fn schedule_from_payload(info: &crate::schema::CollectionInfo, payload: &Map<String, Value>) -> Option<DateTime<Utc>> {
     let field = info.def.meta.versioning.schedule_field.as_deref()?;
-    let v = payload.get(field)?;
-    match v {
-        Value::Null => None,
-        Value::String(s) => DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc)),
-        _ => None,
-    }
+    let s = payload.get(field)?.as_str()?;
+    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
 }
 
-/// Deep-merge `patch` onto `base`. Objects merge recursively; arrays and scalars in `patch` replace.
-fn merge_json(base: Value, patch: Value) -> Value {
-    match (base, patch) {
-        (Value::Object(mut b), Value::Object(p)) => {
-            for (k, v) in p {
-                match b.get_mut(&k) {
-                    Some(existing) if existing.is_object() && v.is_object() => {
-                        *existing = merge_json(existing.clone(), v);
-                    }
-                    _ => {
-                        b.insert(k, v);
-                    }
+/// Draft fields over the live item, limited to the fields the live read returned (so `fields=` is respected).
+fn overlay_draft(live: Value, draft: Value) -> Value {
+    match (live, draft) {
+        (Value::Object(mut l), Value::Object(d)) => {
+            for (k, v) in d {
+                if let Some(slot) = l.get_mut(&k) {
+                    *slot = v;
                 }
             }
-            Value::Object(b)
+            Value::Object(l)
         }
-        (_, p) => p,
+        (l, _) => l,
     }
 }
 
@@ -103,10 +93,6 @@ fn strip_stored_draft(mut obj: Map<String, Value>) -> Value {
         obj.remove(sys);
     }
     Value::Object(obj)
-}
-
-async fn published_item(ctx: &Ctx, conn: &mut PgConnection, collection: &str, id: Uuid) -> Result<Value> {
-    items::read_one(ctx, conn, collection, &id.to_string(), FieldTree::parse(&["*"])).await
 }
 
 /// Drop fields the caller may not read from a stored draft snapshot.
@@ -145,13 +131,27 @@ pub async fn draft_meta(conn: &mut PgConnection, collection: &str, item: Uuid) -
     let row: Option<Option<DateTime<Utc>>> =
         sqlx::query_scalar("SELECT publish_at FROM ferro_item_drafts WHERE collection = $1 AND item = $2")
             .bind(collection)
-            .bind(item)
+            .bind(item.to_string())
             .fetch_optional(&mut *conn)
             .await?;
     Ok(match row {
         None => DraftMeta::default(),
         Some(publish_at) => DraftMeta { has_draft: true, publish_at },
     })
+}
+
+pub async fn read_one(ctx: &Ctx, conn: &mut PgConnection, collection: &str, id: Uuid, fields: FieldTree, version: ReadVersion) -> Result<Value> {
+    match version {
+        ReadVersion::Draft => read_draft(ctx, conn, collection, id, fields).await,
+        ReadVersion::Published => items::read_one(ctx, conn, collection, &id.to_string(), fields).await,
+    }
+}
+
+pub async fn update_one(ctx: &Ctx, conn: &mut PgConnection, collection: &str, id: Uuid, payload: Value, version: ReadVersion) -> Result<()> {
+    match version {
+        ReadVersion::Draft => save_draft(ctx, conn, collection, id, payload).await,
+        ReadVersion::Published => items::update_one(ctx, conn, collection, id, payload).await,
+    }
 }
 
 pub async fn read_draft(
@@ -162,16 +162,14 @@ pub async fn read_draft(
     fields: FieldTree,
 ) -> Result<Value> {
     let info = ctx.schema.collection(collection)?;
-    if !info.def.versioning_enabled() {
-        return Err(FerroError::invalid(format!("`{collection}` does not use content versioning")));
-    }
+    require_draft_enabled(&info)?;
     let perm = permissions::access(&ctx.acc, collection, Action::Read)?;
     items::ensure_permitted(ctx, conn, &info, &perm, &[id]).await?;
     let Some(draft) = load_draft(conn, collection, id).await? else {
         return items::read_one(ctx, conn, collection, &id.to_string(), fields).await;
     };
     let live = items::read_one(ctx, conn, collection, &id.to_string(), fields).await?;
-    let merged = merge_json(live, draft.data);
+    let merged = overlay_draft(live, draft.data);
     let mut out = filter_draft_by_permissions(&info, &perm, merged);
     if let Some(obj) = out.as_object_mut() {
         obj.insert("id".into(), json!(id.to_string()));
@@ -179,17 +177,15 @@ pub async fn read_draft(
     Ok(out)
 }
 
-pub async fn save_draft(
-    ctx: &Ctx,
-    conn: &mut PgConnection,
-    collection: &str,
-    id: Uuid,
-    payload: Value,
-) -> Result<()> {
+pub async fn save_draft(ctx: &Ctx, conn: &mut PgConnection, collection: &str, id: Uuid, payload: Value) -> Result<()> {
+    store_draft(ctx, conn, collection, id, payload, false).await
+}
+
+/// Only the changed fields are stored, so publishing does not overwrite live edits made since.
+/// `replace` drops the previous draft instead of adding to it.
+async fn store_draft(ctx: &Ctx, conn: &mut PgConnection, collection: &str, id: Uuid, payload: Value, replace: bool) -> Result<()> {
     let info = ctx.schema.collection(collection)?;
-    if !info.def.versioning_enabled() {
-        return Err(FerroError::invalid(format!("`{collection}` does not use content versioning")));
-    }
+    require_draft_enabled(&info)?;
     if !items::exists(conn, collection, id).await? {
         return Err(FerroError::not_found(format!("item `{id}` not found in `{collection}`")));
     }
@@ -198,21 +194,21 @@ pub async fn save_draft(
         return Err(FerroError::invalid("payload must be an object"));
     };
     obj.remove("id");
-    check_fields_and_validate(&perm, &info, &obj, false)?;
+    items::check_fields(&perm, &info, &obj)?;
+    items::validate_payload(&perm, &info, &obj, false)?;
     items::ensure_permitted(ctx, conn, &info, &perm, &[id]).await?;
-    let publish_at = schedule_from_payload(&info, &Value::Object(obj.clone()));
-    let base = if let Some(d) = load_draft(conn, collection, id).await? {
-        d.data
+    let previous = load_draft(conn, collection, id).await?;
+    let publish_at = if info.def.meta.versioning.schedule_field.as_ref().is_some_and(|f| obj.contains_key(f)) {
+        schedule_from_payload(&info, &obj)
     } else {
-        published_item(ctx, conn, collection, id).await?
+        previous.as_ref().and_then(|d| d.publish_at)
     };
-    let merged = merge_json(base, Value::Object(obj));
-    let data = match merged {
-        Value::Object(o) => strip_stored_draft(o),
-        _ => return Err(FerroError::Internal("invalid draft merge".into())),
+    let mut data = match previous {
+        Some(DraftRow { data: Value::Object(o), .. }) if !replace => o,
+        _ => Map::new(),
     };
-    write_draft_row(conn, collection, id, &data, publish_at, ctx.acc.user).await?;
-    Ok(())
+    data.extend(obj);
+    write_draft_row(conn, collection, id, &strip_stored_draft(data), publish_at, ctx.acc.user).await
 }
 
 async fn write_draft_row(
@@ -230,7 +226,7 @@ async fn write_draft_row(
          date_updated = now(), user_updated = EXCLUDED.user_updated",
     )
     .bind(collection)
-    .bind(id)
+    .bind(id.to_string())
     .bind(data)
     .bind(publish_at)
     .bind(user)
@@ -239,41 +235,12 @@ async fn write_draft_row(
     Ok(())
 }
 
-async fn save_draft_replace(
-    ctx: &Ctx,
-    conn: &mut PgConnection,
-    collection: &str,
-    id: Uuid,
-    payload: Value,
-) -> Result<()> {
-    let info = ctx.schema.collection(collection)?;
-    require_draft_enabled(&info)?;
-    if !items::exists(conn, collection, id).await? {
-        return Err(FerroError::not_found(format!("item `{id}` not found in `{collection}`")));
-    }
-    let perm = permissions::access(&ctx.acc, collection, Action::Update)?;
-    let Value::Object(mut obj) = payload else {
-        return Err(FerroError::invalid("payload must be an object"));
-    };
-    obj.remove("id");
-    check_fields_and_validate(&perm, &info, &obj, false)?;
-    items::ensure_permitted(ctx, conn, &info, &perm, &[id]).await?;
-    let publish_at = schedule_from_payload(&info, &Value::Object(obj.clone()));
-    let data = strip_stored_draft(obj);
-    write_draft_row(conn, collection, id, &data, publish_at, ctx.acc.user).await
-}
-
-fn check_fields_and_validate(perm: &Access, info: &crate::schema::CollectionInfo, obj: &Map<String, Value>, is_create: bool) -> Result<()> {
-    items::check_fields(perm, info, obj)?;
-    items::validate_payload(perm, info, obj, is_create)
-}
-
 async fn next_version_number(conn: &mut PgConnection, collection: &str, item: Uuid) -> Result<i32> {
     let n: Option<i32> = sqlx::query_scalar(
         "SELECT max(version_number) FROM ferro_item_versions WHERE collection = $1 AND item = $2",
     )
     .bind(collection)
-    .bind(item)
+    .bind(item.to_string())
     .fetch_one(&mut *conn)
     .await?;
     Ok(n.unwrap_or(0) + 1)
@@ -301,7 +268,7 @@ async fn archive_published(ctx: &Ctx, conn: &mut PgConnection, collection: &str,
     )
     .bind(Uuid::now_v7())
     .bind(collection)
-    .bind(id)
+    .bind(id.to_string())
     .bind(ver)
     .bind(&snapshot)
     .bind(ctx.acc.user)
@@ -319,9 +286,7 @@ pub async fn publish(
     force: bool,
 ) -> Result<()> {
     let info = ctx.schema.collection(collection)?;
-    if !info.def.versioning_enabled() {
-        return Err(FerroError::invalid(format!("`{collection}` does not use content versioning")));
-    }
+    require_draft_enabled(&info)?;
     let perm = permissions::access(&ctx.acc, collection, Action::Update)?;
     items::ensure_permitted(ctx, conn, &info, &perm, &[id]).await?;
     let Some(draft) = load_draft(conn, collection, id).await? else {
@@ -343,7 +308,7 @@ pub async fn publish(
     items::update_one(ctx, conn, collection, id, payload).await?;
     sqlx::query("DELETE FROM ferro_item_drafts WHERE collection = $1 AND item = $2")
         .bind(collection)
-        .bind(id)
+        .bind(id.to_string())
         .execute(&mut *conn)
         .await?;
     activity::record(
@@ -367,14 +332,12 @@ pub async fn discard_draft(
     id: Uuid,
 ) -> Result<()> {
     let info = ctx.schema.collection(collection)?;
-    if !info.def.versioning_enabled() {
-        return Err(FerroError::invalid(format!("`{collection}` does not use content versioning")));
-    }
+    require_draft_enabled(&info)?;
     let perm = permissions::access(&ctx.acc, collection, Action::Update)?;
     items::ensure_permitted(ctx, conn, &info, &perm, &[id]).await?;
     let n = sqlx::query("DELETE FROM ferro_item_drafts WHERE collection = $1 AND item = $2")
         .bind(collection)
-        .bind(id)
+        .bind(id.to_string())
         .execute(&mut *conn)
         .await?
         .rows_affected();
@@ -400,9 +363,7 @@ pub async fn list_versions(
     id: Uuid,
 ) -> Result<Vec<VersionSummary>> {
     let info = ctx.schema.collection(collection)?;
-    if !info.def.versioning_enabled() {
-        return Err(FerroError::invalid(format!("`{collection}` does not use content versioning")));
-    }
+    require_draft_enabled(&info)?;
     let perm = permissions::access(&ctx.acc, collection, Action::Read)?;
     items::ensure_permitted(ctx, conn, &info, &perm, &[id]).await?;
     let rows: Vec<(Uuid, i32, DateTime<Utc>, Option<Uuid>)> = sqlx::query_as(
@@ -410,7 +371,7 @@ pub async fn list_versions(
          WHERE collection = $1 AND item = $2 ORDER BY version_number DESC",
     )
     .bind(collection)
-    .bind(id)
+    .bind(id.to_string())
     .fetch_all(&mut *conn)
     .await?;
     Ok(rows
@@ -432,9 +393,7 @@ pub async fn restore_version_to_draft(
     version_id: Uuid,
 ) -> Result<()> {
     let info = ctx.schema.collection(collection)?;
-    if !info.def.versioning_enabled() {
-        return Err(FerroError::invalid(format!("`{collection}` does not use content versioning")));
-    }
+    require_draft_enabled(&info)?;
     let perm = permissions::access(&ctx.acc, collection, Action::Update)?;
     items::ensure_permitted(ctx, conn, &info, &perm, &[item]).await?;
     let data: Option<Value> = sqlx::query_scalar(
@@ -442,7 +401,7 @@ pub async fn restore_version_to_draft(
     )
     .bind(version_id)
     .bind(collection)
-    .bind(item)
+    .bind(item.to_string())
     .fetch_optional(&mut *conn)
     .await?;
     let Some(data) = data else {
@@ -458,7 +417,7 @@ pub async fn restore_version_to_draft(
         }
         _ => return Err(FerroError::Internal("invalid version payload".into())),
     };
-    save_draft_replace(ctx, conn, collection, item, payload).await
+    store_draft(ctx, conn, collection, item, payload, true).await
 }
 
 pub async fn schedule_publish(
@@ -468,18 +427,13 @@ pub async fn schedule_publish(
     id: Uuid,
     publish_at: DateTime<Utc>,
 ) -> Result<()> {
-    if publish_at <= Utc::now() {
-        return publish(ctx, conn, collection, id, true).await;
-    }
     let info = ctx.schema.collection(collection)?;
-    if !info.def.versioning_enabled() {
-        return Err(FerroError::invalid(format!("`{collection}` does not use content versioning")));
-    }
+    require_draft_enabled(&info)?;
     let perm = permissions::access(&ctx.acc, collection, Action::Update)?;
     items::ensure_permitted(ctx, conn, &info, &perm, &[id]).await?;
     let n = sqlx::query("UPDATE ferro_item_drafts SET publish_at = $3 WHERE collection = $1 AND item = $2")
         .bind(collection)
-        .bind(id)
+        .bind(id.to_string())
         .bind(publish_at)
         .execute(&mut *conn)
         .await?
@@ -496,7 +450,7 @@ pub async fn publish_due(pool: &crate::db::PgPool, schema: Arc<Schema>) -> Resul
     loop {
         let mut tx = pool.begin().await?;
         let row: Option<(String, Uuid)> = sqlx::query_as(
-            "SELECT collection, item FROM ferro_item_drafts \
+            "SELECT collection, item::uuid FROM ferro_item_drafts \
              WHERE publish_at IS NOT NULL AND publish_at <= now() \
              FOR UPDATE SKIP LOCKED LIMIT 1",
         )
@@ -509,7 +463,7 @@ pub async fn publish_due(pool: &crate::db::PgPool, schema: Arc<Schema>) -> Resul
         if schema.collection(&collection).ok().filter(|c| c.def.versioning_enabled()).is_none() {
             sqlx::query("UPDATE ferro_item_drafts SET publish_at = NULL WHERE collection = $1 AND item = $2")
                 .bind(&collection)
-                .bind(item)
+                .bind(item.to_string())
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -520,9 +474,9 @@ pub async fn publish_due(pool: &crate::db::PgPool, schema: Arc<Schema>) -> Resul
             acc: Accountability::system(),
             origin: activity::ORIGIN_API,
         };
+        // the update inside publish emits the realtime event
         match publish(&ctx, &mut tx, &collection, item, true).await {
             Ok(()) => {
-                realtime::notify(&mut tx, &collection, "update", &[item]).await?;
                 tx.commit().await?;
                 published += 1;
             }
@@ -530,7 +484,7 @@ pub async fn publish_due(pool: &crate::db::PgPool, schema: Arc<Schema>) -> Resul
                 tracing::warn!(collection = %collection, item = %item, error = %e, "scheduled publish failed");
                 sqlx::query("UPDATE ferro_item_drafts SET publish_at = NULL WHERE collection = $1 AND item = $2")
                     .bind(&collection)
-                    .bind(item)
+                    .bind(item.to_string())
                     .execute(&mut *tx)
                     .await?;
                 tx.commit().await?;
@@ -540,10 +494,11 @@ pub async fn publish_due(pool: &crate::db::PgPool, schema: Arc<Schema>) -> Resul
     Ok(published)
 }
 
-pub async fn delete_drafts_for_item(conn: &mut PgConnection, collection: &str, id: Uuid) -> Result<()> {
-    sqlx::query("DELETE FROM ferro_item_drafts WHERE collection = $1 AND item = $2")
+pub async fn delete_drafts(conn: &mut PgConnection, collection: &str, ids: &[Uuid]) -> Result<()> {
+    let ids: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+    sqlx::query("DELETE FROM ferro_item_drafts WHERE collection = $1 AND item = ANY($2)")
         .bind(collection)
-        .bind(id)
+        .bind(&ids)
         .execute(&mut *conn)
         .await?;
     Ok(())
@@ -578,12 +533,10 @@ mod tests {
     }
 
     #[test]
-    fn merge_json_partial_patch() {
-        let base = json!({ "title": "Live", "slug": "home", "status": "published" });
-        let patch = json!({ "title": "Draft" });
-        let m = merge_json(base, patch);
-        assert_eq!(m["title"], "Draft");
-        assert_eq!(m["slug"], "home");
+    fn overlay_keeps_only_requested_fields() {
+        let live = json!({ "id": "x", "title": "Live" });
+        let draft = json!({ "title": "Draft", "slug": "other" });
+        assert_eq!(overlay_draft(live, draft), json!({ "id": "x", "title": "Draft" }));
     }
 
     #[test]
